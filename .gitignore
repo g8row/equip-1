@@ -1,6 +1,8 @@
 .DS_Store
 notes.txt
 os/os-env/
+pcb
+os/recorder.py
 
 
 plasticity/*.plasticity
