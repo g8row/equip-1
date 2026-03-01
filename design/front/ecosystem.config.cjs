@@ -1,7 +1,7 @@
 module.exports = {
   apps: [
     {
-      name: 'front',
+      name: 'equip-1',
       script: '.output/server/index.mjs',
       instances: 'max',
       exec_mode: 'cluster',
