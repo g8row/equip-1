@@ -269,37 +269,13 @@ class TestScreen(Screen):
 # --- LED (WS2812B via C helper) ---
 # not working with the 2f and firehat prototype :/ 
 # Pi5 could work because the connected pin supports PWM
+# LED needs rewrite
 
-class LED:
+""" class LED:
     def __init__(self):
-        self.led_bin = os.path.join(os.path.dirname(os.path.abspath(__file__)), "led")
         self._color = (0, 0, 0)
-        self.off()
-    
-    def set_color(self, r, g, b):
-        if (r, g, b) == self._color:
-            return
-        self._color = (r, g, b)
-        try:
-            subprocess.run(["sudo", self.led_bin, str(r), str(g), str(b)], 
-                          capture_output=True, timeout=1)
-        except:
-            pass
-    
-    def off(self):
-        self.set_color(0, 0, 0)
-    
-    def red(self):
-        self.set_color(255, 0, 0)
-    
-    def green(self):
-        self.set_color(0, 255, 0)
-    
-    def blue(self):
-        self.set_color(0, 0, 255)
-    
-    def close(self):
-        self.off()
+        self.off() """
+
 
 
 class Buzzer:
