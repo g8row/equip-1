@@ -59,8 +59,8 @@
         </div>
       </footer>
       <div class="logos">
-        <img class="osh-logo" src="/osh.svg" alt="OSH" />
-        <img class="ce-logo" src="/c-e.svg" alt="CE" />
+        <a><img class="osh-logo" src="/osh.svg" alt="Open Source Hardware" /></a>
+        <a href="https://c-e.group"><img class="ce-logo" src="/c-e.svg" alt="Built by Computer Equipment Group" /></a>
       </div>
     </div>
   </div>
@@ -293,10 +293,13 @@ footer .t div.active {
   display: flex;
   align-items: center;
   gap: 1.5rem;
+}
+
+.logos a {
   opacity: 0.333;
 }
 
-.logos:hover {
+.logos a:hover {
   opacity: 1;
 }
 

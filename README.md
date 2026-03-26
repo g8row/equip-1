@@ -1,3 +1,5 @@
+![Equip-1 + Firehat](design/media/equip-1-firehat-loop.gif)
+
 # Equip-1
 
 Compact DV recorder. Connects to any FireWire camcorder and saves footage directly to microSD. No laptop required.
@@ -37,6 +39,6 @@ Hardware is licensed under [CERN OHL-S](https://ohwr.org/cern_ohl_s_v2.txt). Sof
 
 ## Community
 
-Discord: [discord.gg/jfMNN83wep](https://discord.gg/wpXmcb5mvK)
+Discord: [discord.gg/wpXmcb5mvK](https://discord.gg/wpXmcb5mvK)
 
 If you like this project and want to know more about the development and future steps, or even build your own version, feel free to join this discord. We are a small community building objects with computers!
