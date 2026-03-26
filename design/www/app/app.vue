@@ -14,7 +14,7 @@
           <div :class="{ active: currentModel === 'equip-1' }" @click="setModel('equip-1')">Equip-1</div>
           <div :class="{ active: currentModel === 'firehat' }" @click="setModel('firehat')">Firehat</div>
         </div>
-        <div class="d" :class="{ open: inspectOpen }">
+        <div class="d">
           <div class="content">
             <p>
               Equip-1 is a digital video recorder, which allows users to capture video from their DV cameras via
@@ -55,7 +55,7 @@
             <a href="https://github.com/computerequipmentgroup/equip-1">Github</a>
             <a href="https://discord.gg/QEGVWvQaCJ">Discord</a>
           </div>
-          <button @click="inspectOpen = !inspectOpen">Inspect</button>
+          <a href="https://www.crowdsupply.com/computer-equipment-group/equip-1" target="_blank" class="inspect">Inspect</a>
         </div>
       </footer>
       <div class="logos">
@@ -69,7 +69,6 @@
 <script setup lang="ts">
 const { currentModel, setModel } = useModelColor()
 const specsOpen = ref(false)
-const inspectOpen = ref(false)
 </script>
 
 <style>
@@ -231,8 +230,10 @@ footer .buttons a:hover {
   background: rgba(0, 0, 0, 1);
 }
 
-footer button {
+footer a.inspect {
   position: absolute;
+  display: flex;
+  align-items: center;
   height: 100%;
   padding: 1rem 1.5rem;
   font-family: 'w', monospace;
@@ -248,8 +249,10 @@ footer button {
   filter: invert(1) saturate(2.5);
 }
 
-footer button:hover {
+footer a.inspect:hover {
   padding: 1rem 2rem;
+  color: white;
+  background: linear-gradient(0deg, #50f, #000);
 }
 
 footer .t {
@@ -380,7 +383,7 @@ footer .t div.active {
     padding: 1rem 2rem;
   }
 
-  footer button {
+  footer a.inspect {
     position: static;
     height: auto;
     width: 100%;
@@ -388,6 +391,7 @@ footer .t div.active {
     font-size: 0.85rem;
     border-radius: 0;
     border: none;
+    justify-content: center;
   }
 
   footer .d .specs {
