@@ -1,0 +1,290 @@
+:root {
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  color: #1f2328;
+  background: radial-gradient(circle at top right, #f3f4d8 0%, #eceff3 45%, #dde4eb 100%);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+}
+
+.page {
+  max-width: 1050px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+.hero h1 {
+  margin: 0;
+  font-size: 2rem;
+}
+
+.hero p {
+  margin-top: 0.5rem;
+  color: #38414a;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-top: 1.2rem;
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.8);
+  border: 1px solid #ced5dd;
+  border-radius: 12px;
+  padding: 1rem;
+  backdrop-filter: blur(3px);
+}
+
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.dot {
+  width: 0.7rem;
+  height: 0.7rem;
+  border-radius: 50%;
+}
+
+.dot.live {
+  background: #cc1e1e;
+  box-shadow: 0 0 0.5rem #cc1e1e88;
+}
+
+.dot.idle {
+  background: #5b6570;
+}
+
+.timer {
+  font-family: "IBM Plex Mono", monospace;
+  font-size: 2rem;
+  margin: 0.6rem 0;
+}
+
+button {
+  border: 0;
+  border-radius: 9px;
+  background: #102a43;
+  color: white;
+  padding: 0.6rem 0.9rem;
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.error {
+  margin-top: 1rem;
+  background: #ffefef;
+  color: #8d1b1b;
+  border: 1px solid #f4c7c7;
+  border-radius: 8px;
+  padding: 0.7rem;
+}
+
+.server-selector {
+  margin-top: 1rem;
+}
+
+.server-now {
+  font-family: "IBM Plex Mono", monospace;
+  margin: 0.4rem 0 0.8rem;
+}
+
+.server-row {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 0.6rem;
+}
+
+.server-row input {
+  border: 1px solid #ced5dd;
+  border-radius: 9px;
+  padding: 0.6rem 0.7rem;
+  font: inherit;
+}
+
+.discovery-results {
+  margin-top: 0.8rem;
+}
+
+.discovery-results h3 {
+  margin: 0.3rem 0 0.5rem;
+  font-size: 0.95rem;
+}
+
+.discovery-results ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.discovery-results li + li {
+  margin-top: 0.5rem;
+}
+
+.discovery-item {
+  width: 100%;
+  background: #f4f8fb;
+  color: #102a43;
+  border: 1px solid #ced5dd;
+  display: flex;
+  justify-content: space-between;
+  gap: 0.8rem;
+  text-align: left;
+}
+
+.stream-card {
+  margin-top: 1rem;
+}
+
+.stream-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-bottom: 0.7rem;
+}
+
+.stream-header-row h2 {
+  margin: 0;
+}
+
+.stream-mode-tabs {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.tab {
+  background: #e8ecf0;
+  color: #102a43;
+  border-radius: 7px;
+  padding: 0.35rem 0.65rem;
+  font-size: 0.82rem;
+  font-weight: 600;
+}
+
+.tab.active {
+  background: #102a43;
+  color: #fff;
+}
+
+.badge {
+  font-weight: 400;
+  font-size: 0.72rem;
+  opacity: 0.8;
+}
+
+.stream-info-row {
+  display: flex;
+  gap: 1rem;
+  margin-bottom: 0.6rem;
+}
+
+.stream-status-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5rem;
+}
+
+.stream-btn-row {
+  display: flex;
+  gap: 0.4rem;
+}
+
+.btn-sm {
+  padding: 0.3rem 0.6rem;
+  font-size: 0.82rem;
+  border-radius: 7px;
+}
+
+.stream-actions {
+  margin-bottom: 0.6rem;
+}
+
+.stream-placeholder {
+  width: 100%;
+  min-height: 180px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  border: 1px dashed #d6dee6;
+  background: #0e1116;
+  color: #555;
+  font-size: 0.9rem;
+}
+
+.whep-player video,
+.stream-preview {
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  border-radius: 10px;
+  border: 1px solid #d6dee6;
+  background: #0e1116;
+  display: block;
+}
+
+.stream-error {
+  color: #8d1b1b;
+  font-size: 0.85rem;
+  margin: 0.3rem 0;
+}
+
+.files {
+  margin-top: 1rem;
+}
+
+.files ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.files li {
+  display: flex;
+  justify-content: space-between;
+  padding: 0.5rem 0;
+  border-top: 1px solid #dde4eb;
+}
+
+.file-actions {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.download-link {
+  color: #102a43;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid #ced5dd;
+  border-radius: 6px;
+  padding: 0.2rem 0.45rem;
+  background: #f4f8fb;
+}
+
+.download-link:hover {
+  background: #e7f0f8;
+}
+
+@media (max-width: 800px) {
+  .server-row {
+    grid-template-columns: 1fr;
+  }
+}
