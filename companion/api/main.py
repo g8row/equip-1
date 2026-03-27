@@ -514,12 +514,23 @@ class MediamtxManager:
     def __init__(self) -> None:
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
+        self._last_start_attempt_ts: float = 0.0
+        self._restart_cooldown_seconds = 5.0
 
     def start(self) -> bool:
         with self._lock:
             if self._process is not None and self._process.poll() is None:
                 logger.info("mediamtx-already-running pid=%s", self._process.pid)
                 return True
+
+            now = time.time()
+            if (now - self._last_start_attempt_ts) < self._restart_cooldown_seconds:
+                logger.info(
+                    "mediamtx-start-cooldown remaining=%.1fs",
+                    self._restart_cooldown_seconds - (now - self._last_start_attempt_ts),
+                )
+                return False
+            self._last_start_attempt_ts = now
 
             if shutil.which(MEDIAMTX_BINARY) is None:
                 logger.warning(
@@ -533,9 +544,10 @@ class MediamtxManager:
                 self._process = subprocess.Popen(
                     [MEDIAMTX_BINARY],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
+                    stderr=subprocess.PIPE,
                     start_new_session=True,
                 )
+                _spawn_stderr_logger(self._process, "mediamtx")
                 logger.info("mediamtx-start pid=%s", self._process.pid)
                 # Give mediamtx a moment to bind its ports before clients connect
                 time.sleep(0.5)
@@ -574,6 +586,7 @@ class MediamtxManager:
 
 _MJPEG_CHUNK_SIZE = 8192
 _MJPEG_CLIENT_QUEUE_DEPTH = 40  # frames before drop
+_VIDEO_GLOBS = ("*.dv", "*.mkv", "*.mp4", "*.ts")
 
 
 class MjpegBroadcaster:
@@ -710,12 +723,13 @@ class MjpegBroadcaster:
 # ---------------------------------------------------------------------------
 
 class SeamlessDvHub:
-    """Single-owner DV capture hub for seamless preview/record transitions.
+    """Single-owner DV capture hub for seamless streaming/record transitions.
 
     Pipeline:
-      dvgrab --format raw -  ->  ffmpeg (DV -> MJPEG pipe)
+      dvgrab --format raw -  ->  ffmpeg (DV -> RTSP + MJPEG pipe)
 
-    - Preview subscribers read MJPEG chunks from one shared ffmpeg process.
+    - WebRTC preview stays alive via continuous RTSP publish to mediamtx.
+    - MJPEG subscribers read chunks from one shared ffmpeg process.
     - Recording toggles only file writing on/off; capture ownership is unchanged.
     """
 
@@ -737,6 +751,11 @@ class SeamlessDvHub:
                     return
 
         self.stop()
+
+        if not mediamtx.is_running():
+            mediamtx.start()
+
+        rtsp_args = _build_rtsp_video_output_args(MEDIAMTX_RTSP_URL)
 
         dvgrab_process = subprocess.Popen(
             ["dvgrab", "--format", "raw", "-"],
@@ -761,6 +780,9 @@ class SeamlessDvHub:
                 "dv",
                 "-i",
                 "pipe:0",
+                *rtsp_args,
+                "-map",
+                "0:v",
                 "-vf",
                 "fps=10,scale=960:-1",
                 "-q:v",
@@ -1002,15 +1024,11 @@ class RecorderState:
         selected_encoder = _safe_selected_rtsp_encoder()
         webrtc_ok = _is_webrtc_compatible_encoder(selected_encoder) if selected_encoder else False
 
-        # Seamless no-FIFO fallback: one dvgrab owner with preview+record in app.
-        if capture_mode == "dvgrab" and not webrtc_ok:
-            preview.stop()
-            mjpeg_broadcaster.stop()
-            _stop_all_direct_mjpeg_streams()
-
+        # dvgrab mode uses one always-on capture hub for stream + recording tap.
+        if capture_mode == "dvgrab":
             timestamp = time.strftime("%Y%m%d_%H%M%S")
             output_path = CAPTURE_DIR / f"capture_{timestamp}.dv"
-            logger.info("record-start seamless-fallback output=%s encoder=%s", output_path, selected_encoder)
+            logger.info("record-start seamless-hub output=%s encoder=%s", output_path, selected_encoder)
 
             seamless_hub.start_recording(output_path)
             self.mode = "recording"
@@ -1150,10 +1168,8 @@ class RecorderState:
         logger.info("record-stop requested mode=%s file=%s", self.mode, self.current_file)
 
         capture_mode = config.get_mode()
-        selected_encoder = _safe_selected_rtsp_encoder()
-        webrtc_ok = _is_webrtc_compatible_encoder(selected_encoder) if selected_encoder else False
 
-        if capture_mode == "dvgrab" and not webrtc_ok:
+        if capture_mode == "dvgrab":
             seamless_hub.stop_recording()
             self.mode = "idle"
             self.start_time = None
@@ -1176,10 +1192,7 @@ class RecorderState:
             return
 
         capture_mode = config.get_mode()
-        selected_encoder = _safe_selected_rtsp_encoder()
-        webrtc_ok = _is_webrtc_compatible_encoder(selected_encoder) if selected_encoder else False
-
-        if capture_mode == "dvgrab" and not webrtc_ok:
+        if capture_mode == "dvgrab":
             if not seamless_hub.is_running():
                 logger.error("record-process-died details=%s", [("seamless-hub", "not-running")])
                 self.mode = "idle"
@@ -1469,7 +1482,14 @@ def _storage_stats() -> dict:
 
 def _list_videos(limit: int = 30) -> list[dict]:
     videos = []
-    for path in sorted(CAPTURE_DIR.glob("*.dv"), key=lambda p: p.stat().st_mtime, reverse=True):
+    candidates: list[Path] = []
+    for pattern in _VIDEO_GLOBS:
+        candidates.extend(CAPTURE_DIR.glob(pattern))
+
+    # Deduplicate by resolved path in case patterns overlap.
+    unique_candidates = {p.resolve(): p for p in candidates}.values()
+
+    for path in sorted(unique_candidates, key=lambda p: p.stat().st_mtime, reverse=True):
         meta = path.stat()
         videos.append({
             "name": path.name,
@@ -1525,7 +1545,6 @@ def health() -> dict:
 @app.get("/api/status")
 def status() -> dict:
     state.refresh_process_state()
-    mediamtx.refresh()
     req = _check_stream_requirements()
     rtsp_encoder = _safe_selected_rtsp_encoder() if req["ffmpeg"] else None
     return {
@@ -1687,40 +1706,42 @@ def stream_mjpeg() -> StreamingResponse:
     if not req["ffmpeg"]:
         raise HTTPException(status_code=503, detail="ffmpeg is not installed")
 
+    capture_mode = config.get_mode()
     rtsp_encoder = _safe_selected_rtsp_encoder() if req["ffmpeg"] else None
     webrtc_ok = _is_webrtc_compatible_encoder(rtsp_encoder) if rtsp_encoder else False
+
+    # dvgrab mode always uses the seamless hub as single capture owner.
+    if capture_mode == "dvgrab":
+        seamless_hub.ensure_running()
+
+        def generate_seamless_mjpeg():
+            cid, q = seamless_hub.subscribe()
+            try:
+                while True:
+                    try:
+                        chunk = q.get(timeout=10.0)
+                    except queue.Empty:
+                        logger.warning("seamless-client-timeout cid=%s", cid)
+                        break
+                    if chunk is None:
+                        logger.info("seamless-client-eof cid=%s", cid)
+                        break
+                    yield chunk
+            except GeneratorExit:
+                logger.info("seamless-client-disconnect cid=%s", cid)
+            finally:
+                seamless_hub.unsubscribe(cid)
+
+        logger.info("mjpeg-seamless-hub reason=dvgrab-single-owner encoder=%s", rtsp_encoder)
+        return StreamingResponse(
+            generate_seamless_mjpeg(),
+            media_type="multipart/x-mixed-replace; boundary=ffmpeg",
+            headers={"Cache-Control": "no-store"},
+        )
 
     # No-FIFO fallback path: when RTSP/WebRTC-compatible encoder is not usable,
     # bypass mediamtx and stream MJPEG directly from the capture source.
     if not webrtc_ok:
-        if config.get_mode() == "dvgrab":
-            seamless_hub.ensure_running()
-
-            def generate_seamless_mjpeg():
-                cid, q = seamless_hub.subscribe()
-                try:
-                    while True:
-                        try:
-                            chunk = q.get(timeout=10.0)
-                        except queue.Empty:
-                            logger.warning("seamless-client-timeout cid=%s", cid)
-                            break
-                        if chunk is None:
-                            logger.info("seamless-client-eof cid=%s", cid)
-                            break
-                        yield chunk
-                except GeneratorExit:
-                    logger.info("seamless-client-disconnect cid=%s", cid)
-                finally:
-                    seamless_hub.unsubscribe(cid)
-
-            logger.info("mjpeg-seamless-hub reason=no-webrtc-compatible-encoder encoder=%s", rtsp_encoder)
-            return StreamingResponse(
-                generate_seamless_mjpeg(),
-                media_type="multipart/x-mixed-replace; boundary=ffmpeg",
-                headers={"Cache-Control": "no-store"},
-            )
-
         if _active_direct_mjpeg_count() > 0:
             raise HTTPException(
                 status_code=429,
@@ -1810,7 +1831,10 @@ async def whep_proxy(request: Request) -> Response:
         )
 
     # Ensure something is pushing to the RTSP path
-    if not state.is_recording:
+    if config.get_mode() == "dvgrab":
+        seamless_hub.ensure_running()
+        await asyncio.sleep(0.8)
+    elif not state.is_recording:
         preview.ensure_running()
         # Give the preview ffmpeg time to connect and start publishing to mediamtx
         # before we forward the SDP offer (mediamtx returns 404 with no publisher).
