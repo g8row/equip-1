@@ -1529,6 +1529,35 @@ def _check_stream_requirements() -> dict:
     }
 
 
+def _active_stream_pipeline() -> str:
+    mode = config.get_mode()
+    if mode == "dvgrab":
+        return "dvgrab-seamless-hub" if seamless_hub.is_running() else "dvgrab-seamless-hub-idle"
+
+    if state.is_recording:
+        return "ffmpeg-only-recording"
+    if preview.is_alive():
+        return "ffmpeg-only-preview"
+    if mjpeg_broadcaster.is_running():
+        return "ffmpeg-only-mjpeg-broadcaster"
+    if _active_direct_mjpeg_count() > 0:
+        return "ffmpeg-only-direct-mjpeg"
+    return "ffmpeg-only-idle"
+
+
+def _reset_stream_workers_for_mode_change(new_mode: str) -> None:
+    """Reset active stream workers so mode changes are immediately observable.
+
+    Clients may need to reconnect after mode switch.
+    """
+    logger.info("capture-mode-switch-reset mode=%s", new_mode)
+    _stop_recording_mjpeg_fanout()
+    mjpeg_broadcaster.stop()
+    preview.stop()
+    _stop_all_direct_mjpeg_streams()
+    seamless_hub.stop()
+
+
 # ---------------------------------------------------------------------------
 # Routes — Health & Status
 # ---------------------------------------------------------------------------
@@ -1547,12 +1576,13 @@ def status() -> dict:
     state.refresh_process_state()
     req = _check_stream_requirements()
     rtsp_encoder = _safe_selected_rtsp_encoder() if req["ffmpeg"] else None
+    capture_mode = config.get_mode()
     return {
         "recorder": {
             "mode": state.mode,
             "elapsed_seconds": state.elapsed_seconds,
             "current_file": state.current_file,
-            "capture_mode": config.get_mode(),
+            "capture_mode": capture_mode,
         },
         "storage": _storage_stats(),
         "files": _list_videos(limit=10),
@@ -1570,6 +1600,8 @@ def status() -> dict:
             "rtsp_video_encoder": rtsp_encoder,
             "whep_available": _is_webrtc_compatible_encoder(rtsp_encoder) if rtsp_encoder else False,
             "source": "recording" if state.is_recording else "preview",
+            "capture_mode": capture_mode,
+            "pipeline": _active_stream_pipeline(),
         },
     }
 
@@ -1643,12 +1675,14 @@ def set_recording_capture_mode(body: dict) -> dict:
 
     try:
         config.set_mode(new_mode)
+        _reset_stream_workers_for_mode_change(new_mode)
     except ValueError as error:
         raise HTTPException(status_code=400, detail=str(error)) from error
 
     return {
         "current_mode": config.get_mode(),
         "available_modes": ["dvgrab", "ffmpeg-only"],
+        "stream_reconnect_required": True,
         "message": f"Recording capture mode changed to {new_mode}",
     }
 
