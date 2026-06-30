@@ -304,6 +304,57 @@ export default function Settings() {
         </div>
       </Card>
 
+      {/* About */}
+      <Card title="About">
+        <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-2)" }}>
+          <h2 className="display" style={{ fontSize: "1.4rem", margin: 0 }}>
+            equip&middot;1
+          </h2>
+          <p className="dim" style={{ fontSize: "0.8rem", margin: 0, lineHeight: 1.5 }}>
+            Compact DV recorder. Connects to any FireWire camcorder and saves
+            footage directly to microSD — no laptop required.
+          </p>
+        </div>
+        <div className="kv">
+          <span className="kv__k">board</span>
+          <span className="kv__v">Radxa ROCK 2F &middot; RK3528A</span>
+        </div>
+        <div className="kv">
+          <span className="kv__k">firewire</span>
+          <span className="kv__v">Firehat &middot; VIA VT6315N</span>
+        </div>
+        <div className="kv">
+          <span className="kv__k">formats</span>
+          <span className="kv__v">MiniDV, DVCAM, DVCPRO, Digital8, HDV</span>
+        </div>
+        <div className="row-wrap" style={{ marginTop: "var(--sp-3)" }}>
+          <a
+            className="btn btn--sm btn--ghost"
+            href="https://github.com/computerequipmentgroup/equip-1"
+            target="_blank"
+            rel="noreferrer"
+          >
+            GitHub
+          </a>
+          <a
+            className="btn btn--sm btn--ghost"
+            href="https://discord.gg/wpXmcb5mvK"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Discord
+          </a>
+          <a
+            className="btn btn--sm btn--ghost"
+            href="https://www.crowdsupply.com/computer-equipment-group/equip-1"
+            target="_blank"
+            rel="noreferrer"
+          >
+            Crowd Supply
+          </a>
+        </div>
+      </Card>
+
       {/* Diagnostics */}
       <Card title="Diagnostics">
         {runtimeAvailable === false && !status ? (
