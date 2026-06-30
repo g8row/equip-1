@@ -26,9 +26,9 @@
 
 Custom **Yocto** image `firewire-recorder-image` (MACHINE `rockchip-rk3528-rock-2f`), **BusyBox** userland, **systemd** init. **User can edit the image.**
 
-- **Network stack: ConnMan** (+ `wpa-supplicant`, `iw`, `rfkill`, `connman-tools`). No NetworkManager / hostapd / dnsmasq. → AP mode via **ConnMan WiFi tethering** (built-in gdhcp).
+- **Network stack: ConnMan** (+ `wpa-supplicant`, `iw`, `rfkill`, `connman-tools`). No NetworkManager / hostapd. → AP mode via **ConnMan WiFi tethering** (needs `dnsmasq` for the DHCP/DNS side — added to `IMAGE_INSTALL` 2026-07-01, see §4C).
 - **Bluetooth: bluez5** installed, `bluetooth.service` currently **inactive** (enable it).
-- **WiFi/BT chip: AIC8800** USB combo. **Single radio** → AP and station mutually exclusive. ⚠️ **AIC8800 AP mode + ConnMan tethering must be verified on-device — top risk.** Fallback: add `hostapd`+`dnsmasq` to the image.
+- **WiFi/BT chip: AIC8800** USB combo. Driver supports AP mode fine (`iw phy0 info` lists it); the earlier "Invalid arguments" tethering failure was the missing `dnsmasq`, not a radio/driver limitation (see §4C).
 - **Media:** `ffmpeg`, `x264`, `dvgrab` present; `/dev/fw0` present, but current smoke test reports no attached AV/C camera (`dvgrab`: "Error: no camera exists"; ffmpeg iec61883: "No AV/C devices found."). `h264_rkmpp` only if `FIREWIRE_ENABLE_RKMPP` was set, else `libx264` (also WebRTC-compatible). Encoder probe handles either.
 - **mediamtx: NOT in image** — temporarily copied upstream `mediamtx` v1.19.2 linux arm64 to `/usr/bin/mediamtx` for dev testing; still ship it (Go static binary) + systemd unit in the image.
 - **Companion app: NOT in image** — ship binaries + units (scp for dev; meta recipe for prod).
@@ -95,7 +95,7 @@ Legend: ✅ done · 🔄 in progress · ⬜ todo
 - ✅ BLE GATT running on-device: adapter `88:00:44:00:04:F4`, name `equip-1`, service UUID advertised
 - ✅ **AIC8800 BT**: mainline `btusb` (not vendor `aic_btusb`) creates HCI device; verified on device. Yocto recipe updated to blacklist `aic_btusb` and load `btusb` instead
 - ✅ **rfkill-unblock.service**: systemd oneshot runs after sysinit (modules loaded) to unblock AIC8800 WiFi soft-block before bluetooth.service
-- ⚠️ **AIC8800 AP mode** via ConnMan tethering returns "Invalid arguments" — single-radio constraint or ConnMan version limitation; AP fallback path is coded but unverified. Hostapd fallback may be needed.
+- ✅ **AIC8800 AP mode root-caused (2026-07-01)**: not a single-radio/driver limitation — `iw phy0 info` confirms the driver supports AP mode fine. ConnMan's tethering shells out to `dnsmasq` for DHCP/DNS on the AP interface, and the image never installed it (`find / -iname 'dnsmasq*'` found nothing but a vim syntax file). Added `dnsmasq` to `IMAGE_INSTALL` + a bbappend trimming unneeded conntrack/nftset PACKAGECONFIG. Unverified by an actual image build yet — a field-tested Debian binary pulled in a large transitive glibc dependency chain not worth fighting for an ad-hoc check.
 
 ### D. Capacitor native shell + BLE provisioning UX
 - ✅ `capacitor.config.ts` (appId `com.equip1.companion`), `@capacitor/android`, `@capacitor/cli`, `@capacitor-community/bluetooth-le@8.2.0`, `@capacitor/preferences`
@@ -144,7 +144,8 @@ Constraints: short name `equip-1-XXXX` in scan response; `requestMtu(185)`; noti
 ## 6. Open items / risks to reconcile
 
 - **API contract**: ✅ resolved — `GET /api/network` → `{mode,ssid,ip,ap}`, `POST /api/network/wifi` → `{ssid,psk}`, `POST /api/network/ap` → `{enabled,ssid,passphrase}`, `GET /api/network/scan` → `{networks:[{ssid,strength,state}]}`, `GET /api/system/power` → `{battery,charging}`. All wired in httpapi; frontend api.js matches.
-- **AIC8800 AP mode** via ConnMan tethering — verify early; hostapd+dnsmasq image fallback ready.
+- **AIC8800 AP mode**: root cause found (missing `dnsmasq`, see §4C); fix shipped in the Yocto layer but not yet verified by an actual image build.
+- **BLE WiFi scan-and-select**: the `wifi_scan` BLE characteristic (`e2710006-...`) is a hardcoded stub returning `{"networks":[],"err":"scan-not-implemented"}` — `internal/network.Manager.ScanWifi` already exists and works (used by the HTTP `/api/network/scan` route and Settings.jsx), it's just not wired to the BLE characteristic. `writeWifiCreds`/`readWifiScan`/`subscribeNetResult` already exist in `web/src/lib/ble.js` but `Connect.jsx` never calls them — the BLE provisioning flow currently asks the user to manually join the device's AP via OS WiFi settings instead of writing credentials directly over BLE, even though the backend (`provisioning.ApplyCredentials`) fully supports it.
 - **SPA deep links**: backend `static.go` must serve `index.html` fallback for non-`/api` routes (BrowserRouter) — confirm in review.
 - **Camera attachment**: `/dev/fw0` alone is not enough to prove a DV camera is online; current board reports no AV/C device to both dvgrab and ffmpeg iec61883. Re-test real streaming/recording with the camera powered/connected.
 - **Encoder**: confirmed current device selects `libx264`; `h264_v4l2m2m` is listed but unusable, and `h264_rkmpp` is absent in this image.

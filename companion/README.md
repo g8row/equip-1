@@ -202,8 +202,8 @@ The recipe installs binaries to `/usr/bin/`, installs all three systemd unit fil
 
 The AIC8800D80 reports HCI/LMP version 5.4 but the firmware rejects BT5 extended LE advertising and scanning commands with `-EBUSY`. `companion-net` works around this in two ways:
 
-- **Userspace** (`internal/ble/hciadv.go`): After registering the GATT application with BlueZ, `companion-net` sends legacy `LE_Set_Advertising_*` HCI commands directly via `hcitool`, bypassing BlueZ's extended advertising path. BlueZ still handles incoming GATT connections.
-- **Kernel patch** (`meta-firewire-recorder/recipes-kernel/linux/files/0001-btusb-Add-AIC8800D80-with-broken-extended-LE-quirks.patch`): Adds the chip's USB ID `a69c:8d81` to `btusb` before the generic class entry and sets `HCI_QUIRK_BROKEN_EXT_SCAN` in a per-device setup hook. Apply by baking the image with the `linux-yocto_%.bbappend` (or `linux-rockchip_%.bbappend`) that includes this patch.
+- **Userspace** (`internal/ble/hciadv.go`): After registering the GATT application with BlueZ, `companion-net` sends legacy `LE_Set_Advertising_*` HCI commands directly via `hcitool`, bypassing BlueZ's extended advertising path. BlueZ still handles incoming GATT connections. **This is the fix actually in production and fully verified on-device.**
+- **Kernel-level quirk (not shipped)**: an earlier attempt added a `btusb` kernel patch setting `HCI_QUIRK_BROKEN_EXT_SCAN`. It was removed because (a) it only affects BlueZ's *scanning* HCI path, which this device never exercises (it's a BLE peripheral being scanned by phones, not a scanner itself — the actual bug we hit was on the *advertising* path, already fixed above), and (b) the hand-authored patch had malformed hunk headers that would likely fail `do_patch`. If a kernel-level fix is wanted later, regenerate it as a real `git diff` against this BSP's actual `drivers/bluetooth/btusb.c` rather than hand-typing hunks.
 
 ---
 
