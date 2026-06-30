@@ -152,9 +152,17 @@ export default function WhepPlayer({ whepUrl, active, status }) {
   const dotClass =
     state === "live" ? "live" : state === "error" ? "warn" : state === "idle" ? "idle" : "warn";
 
+  const statusText = {
+    idle: "Paused",
+    connecting: "Connecting…",
+    retrying: "Reconnecting…",
+    live: "Live",
+    error: "Stream error",
+  }[state];
+
   return (
     <div>
-      <div className="viewer">
+      <div className="viewer viewer--4-3">
         <video
           ref={videoRef}
           autoPlay
@@ -162,14 +170,22 @@ export default function WhepPlayer({ whepUrl, active, status }) {
           playsInline
           className="viewer__media"
         />
-        <div className="viewer__overlay">
-          <span className={`dot ${dotClass}`} />
-          {state}
-        </div>
+        {state !== "live" && (
+          <div className="viewer__cover">
+            <span className={`dot ${dotClass}`} />
+            <span>{statusText}</span>
+          </div>
+        )}
+        {state === "live" && (
+          <div className="viewer__overlay">
+            <span className={`dot ${dotClass}`} />
+            Live
+          </div>
+        )}
       </div>
       {errorMsg && <p className="stream-error">{errorMsg}</p>}
       <div className="viewer__toolbar">
-        <span className="label">webrtc · whep</span>
+        <span className="label">preview</span>
         <div className="row-wrap">
           <Button size="sm" onClick={connect} disabled={state === "connecting"}>
             Reconnect

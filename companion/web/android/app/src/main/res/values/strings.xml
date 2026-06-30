@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">equip-1</string>
+    <string name="title_activity_main">equip-1</string>
+    <string name="package_name">com.equip1.companion</string>
+    <string name="custom_url_scheme">com.equip1.companion</string>
+</resources>

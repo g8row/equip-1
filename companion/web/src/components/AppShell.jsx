@@ -3,20 +3,29 @@ import { NavLink, Outlet } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
 import StatusDot from "./ui/StatusDot";
 
+// 3x3 dot-matrix glyphs — keeps the Nothing-OS dot aesthetic while giving
+// each tab a distinct, recognizable shape instead of an identical 2x2 grid.
+const GLYPHS = {
+  view: [0, 1, 0, 1, 1, 1, 0, 1, 0], // camera / target
+  files: [1, 1, 1, 1, 0, 1, 1, 1, 1], // stack / folder
+  setup: [1, 0, 1, 0, 1, 0, 1, 0, 1], // sliders
+  link: [1, 0, 0, 0, 1, 0, 0, 0, 1], // diagonal link
+};
+
 const NAV = [
-  { to: "/", label: "View", end: true },
-  { to: "/files", label: "Files" },
-  { to: "/settings", label: "Setup" },
-  { to: "/connect", label: "Link" },
+  { to: "/", label: "View", end: true, glyph: "view" },
+  { to: "/files", label: "Files", glyph: "files" },
+  { to: "/settings", label: "Setup", glyph: "setup" },
+  { to: "/connect", label: "Link", glyph: "link" },
 ];
 
-function DotGrid() {
+function DotGrid({ glyph }) {
+  const cells = GLYPHS[glyph] ?? GLYPHS.view;
   return (
     <span className="nav__dotgrid" aria-hidden="true">
-      <span />
-      <span />
-      <span />
-      <span />
+      {cells.map((on, i) => (
+        <span key={i} className={on ? "" : "nav__dotgrid-off"} />
+      ))}
     </span>
   );
 }
@@ -74,7 +83,7 @@ export default function AppShell() {
             end={item.end}
             className={({ isActive }) => `nav__item ${isActive ? "active" : ""}`}
           >
-            <DotGrid />
+            <DotGrid glyph={item.glyph} />
             {item.label}
           </NavLink>
         ))}

@@ -84,7 +84,7 @@ h2.display {
   align-items: center;
   justify-content: space-between;
   gap: var(--sp-3);
-  padding: var(--sp-3) var(--sp-4);
+  padding: max(var(--sp-3), calc(env(safe-area-inset-top) + var(--sp-2))) var(--sp-4) var(--sp-3);
   background: rgba(11, 11, 11, 0.82);
   backdrop-filter: blur(10px);
   border-bottom: 1px solid var(--line);
@@ -125,7 +125,7 @@ h2.display {
   width: 100%;
   max-width: 960px;
   margin: 0 auto;
-  padding: var(--sp-5) var(--sp-4) calc(72px + var(--sp-6));
+  padding: var(--sp-5) var(--sp-4) calc(80px + var(--sp-6) + env(safe-area-inset-bottom));
 }
 
 /* --- Navigation ---------------------------------------------------------- */
@@ -141,7 +141,7 @@ h2.display {
 /* bottom bar on small screens */
 .nav--bottom {
   left: 50%;
-  bottom: var(--sp-4);
+  bottom: max(var(--sp-4), calc(env(safe-area-inset-bottom) + var(--sp-3)));
   transform: translateX(-50%);
   border-radius: var(--radius-pill);
   padding: var(--sp-2);
@@ -173,31 +173,31 @@ h2.display {
 
 .nav__dotgrid {
   display: grid;
-  grid-template-columns: repeat(2, 5px);
-  grid-template-rows: repeat(2, 5px);
-  gap: 3px;
+  grid-template-columns: repeat(3, 4px);
+  grid-template-rows: repeat(3, 4px);
+  gap: 2.5px;
 }
 
 .nav__dotgrid span {
-  width: 5px;
-  height: 5px;
+  width: 4px;
+  height: 4px;
   border-radius: 50%;
   background: currentColor;
-  opacity: 0.55;
+  opacity: 0.85;
+}
+
+.nav__dotgrid span.nav__dotgrid-off {
+  opacity: 0.12;
 }
 
 .nav__item.active {
   color: var(--text);
 }
 
-.nav__item.active .nav__dotgrid span {
-  opacity: 1;
-}
-
-.nav__item.active .nav__dotgrid span:first-child {
+.nav__item.active .nav__dotgrid span:not(.nav__dotgrid-off) {
   background: var(--accent);
   opacity: 1;
-  box-shadow: 0 0 6px var(--accent-glow);
+  box-shadow: 0 0 4px var(--accent-glow);
 }
 
 /* side rail on larger screens */
@@ -530,10 +530,11 @@ h2.display {
 .readout {
   font-family: var(--font-display);
   font-weight: 600;
-  font-size: clamp(2.4rem, 12vw, 3.6rem);
-  letter-spacing: 0.06em;
+  font-size: clamp(1.6rem, 8vw, 3.6rem);
+  letter-spacing: 0.04em;
   line-height: 1;
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* progress bar */
@@ -560,10 +561,17 @@ h2.display {
   background: #000;
 }
 
+/* Pin the box to the DV camera's native 4:3 frame so there's no layout jump
+   between the pre-connect placeholder and the first decoded video frame. */
+.viewer--4-3 {
+  aspect-ratio: 4 / 3;
+}
+
 .viewer__media,
 .viewer video,
 .viewer img.viewer__media {
   width: 100%;
+  height: 100%;
   display: block;
   max-height: 56vh;
   object-fit: contain;
@@ -584,6 +592,22 @@ h2.display {
   font-size: 0.62rem;
   text-transform: uppercase;
   letter-spacing: 0.14em;
+}
+
+/* Full-cover placeholder hiding the native <video> poster / play glyph
+   until the first real frame is decoded. */
+.viewer__cover {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--sp-2);
+  background: var(--bg-deep);
+  color: var(--text-dim);
+  font-size: 0.78rem;
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
 }
 
 .viewer__placeholder {
@@ -627,7 +651,16 @@ h2.display {
 .rec-toggle {
   display: flex;
   align-items: center;
-  gap: var(--sp-4);
+  gap: var(--sp-3);
+}
+
+.rec-toggle__info {
+  flex: 1;
+  min-width: 0;
+}
+
+.rec-toggle .btn {
+  flex: none;
 }
 
 .files-list {
