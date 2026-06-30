@@ -2,6 +2,7 @@ package files
 
 import (
 	"context"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -48,22 +49,27 @@ func generateThumbnail(srcPath, destPath string) error {
 	tmp := destPath + ".tmp"
 	defer os.Remove(tmp)
 
+	// -f mjpeg forces the output muxer explicitly — required because the temp
+	// file is named "<dest>.tmp" (so a rename into place is atomic), and
+	// ffmpeg otherwise infers the muxer from the final extension, which is
+	// ".tmp" rather than ".jpg".
 	args := [][]string{
-		{"-y", "-ss", "1", "-i", srcPath, "-frames:v", "1", "-vf", "scale=320:-1", "-q:v", "5", tmp},
-		{"-y", "-i", srcPath, "-frames:v", "1", "-vf", "scale=320:-1", "-q:v", "5", tmp},
+		{"-y", "-ss", "1", "-i", srcPath, "-frames:v", "1", "-vf", "scale=320:-1", "-q:v", "5", "-f", "mjpeg", tmp},
+		{"-y", "-i", srcPath, "-frames:v", "1", "-vf", "scale=320:-1", "-q:v", "5", "-f", "mjpeg", tmp},
 	}
 
 	var lastErr error
 	for _, a := range args {
 		ctx, cancel := context.WithTimeout(context.Background(), thumbnailGenerateTimeout)
 		cmd := exec.CommandContext(ctx, "ffmpeg", append([]string{"-hide_banner", "-loglevel", "error"}, a...)...)
-		_, err := cmd.CombinedOutput()
+		out, err := cmd.CombinedOutput()
 		cancel()
 		if err == nil {
 			if info, statErr := os.Stat(tmp); statErr == nil && info.Size() > 0 {
 				return os.Rename(tmp, destPath)
 			}
 		}
+		slog.Warn("thumbnail-ffmpeg-attempt-failed", "args", a, "error", err, "output", string(out))
 		lastErr = err
 	}
 	return lastErr
