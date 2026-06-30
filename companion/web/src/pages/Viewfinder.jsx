@@ -3,6 +3,7 @@ import { useServer } from "../context/ServerContext";
 import { getStreamUrl, getWhepUrl, startRecording, stopRecording } from "../api";
 import { formatDuration, formatBytes } from "../lib/format";
 import { streamIssue } from "../lib/stream";
+import { hapticImpact, hapticNotification } from "../lib/haptics";
 import WhepPlayer from "../components/WhepPlayer";
 import MjpegPlayer from "../components/MjpegPlayer";
 import Card from "../components/ui/Card";
@@ -40,11 +41,17 @@ export default function Viewfinder() {
   async function onToggleRecording() {
     setLoading(true);
     try {
-      if (isRecording) await stopRecording(apiBase);
-      else await startRecording(apiBase);
+      if (isRecording) {
+        await stopRecording(apiBase);
+        hapticImpact("Light");
+      } else {
+        await startRecording(apiBase);
+        hapticImpact("Heavy");
+      }
       await refresh();
     } catch (err) {
       setError(err.message || "Toggle failed");
+      hapticNotification("Error");
     } finally {
       setLoading(false);
     }

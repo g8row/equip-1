@@ -2,6 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
 import { isNative } from "../lib/native";
+import { hapticNotification } from "../lib/haptics";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import StatusDot from "../components/ui/StatusDot";
@@ -55,6 +56,12 @@ export default function Connect() {
       return () => clearTimeout(t);
     }
   }, [bleState, navigate]);
+
+  // Haptic feedback on the two terminal BLE outcomes.
+  useEffect(() => {
+    if (bleState === "connected") hapticNotification("Success");
+    else if (bleState === "error") hapticNotification("Error");
+  }, [bleState]);
 
   // --- BLE flow -----------------------------------------------------------
 
