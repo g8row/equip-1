@@ -1,17 +1,27 @@
 import React, { useMemo, useState } from "react";
+import { Link } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
-import { getStreamUrl, getWhepUrl, startRecording, stopRecording } from "../api";
-import { formatDuration, formatBytes } from "../lib/format";
+import {
+  getStreamUrl,
+  getWhepUrl,
+  getFileDownloadUrl,
+  startRecording,
+  stopRecording,
+} from "../api";
+import { formatDuration, formatBytes, formatDate } from "../lib/format";
 import { streamIssue } from "../lib/stream";
 import { hapticImpact, hapticNotification } from "../lib/haptics";
+import { canShareNative, shareFile } from "../lib/share";
 import WhepPlayer from "../components/WhepPlayer";
 import MjpegPlayer from "../components/MjpegPlayer";
+import Thumbnail from "../components/Thumbnail";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import StatusDot from "../components/ui/StatusDot";
 
 export default function Viewfinder() {
-  const { apiBase, status, refresh, setError, error, streamMode } = useServer();
+  const { apiBase, status, files, refresh, setError, error, streamMode } = useServer();
+  const [sharing, setSharing] = useState(false);
 
   const [loading, setLoading] = useState(false);
 
@@ -37,6 +47,22 @@ export default function Viewfinder() {
       : freeBytes < 200 * 1024 * 1024
       ? "low"
       : null;
+
+  const lastFile = !isRecording && files.length > 0 ? files[0] : null;
+
+  async function onShareLast() {
+    if (!lastFile) return;
+    setSharing(true);
+    try {
+      await shareFile(getFileDownloadUrl(apiBase, lastFile.name), lastFile.name);
+    } catch (err) {
+      if (!/cancel/i.test(err.message || "")) {
+        setError(err.message || "Share failed");
+      }
+    } finally {
+      setSharing(false);
+    }
+  }
 
   async function onToggleRecording() {
     setLoading(true);
@@ -129,6 +155,30 @@ export default function Viewfinder() {
           </Button>
         </div>
       </Card>
+
+      {lastFile && (
+        <Card title="Last recording">
+          <div style={{ display: "flex", gap: "var(--sp-3)", alignItems: "center" }}>
+            <Thumbnail apiBase={apiBase} name={lastFile.name} />
+            <div className="file-meta">
+              <span className="name">{lastFile.name}</span>
+              <span className="label">
+                {formatBytes(lastFile.size_bytes)} &middot; {formatDate(lastFile.modified_unix)}
+              </span>
+            </div>
+          </div>
+          <div className="row-wrap" style={{ marginTop: "var(--sp-3)" }}>
+            {canShareNative(lastFile.size_bytes) && (
+              <Button size="sm" variant="ghost" disabled={sharing} onClick={onShareLast}>
+                {sharing ? "…" : "Share"}
+              </Button>
+            )}
+            <Link to="/files" className="btn btn--sm btn--ghost">
+              View all files
+            </Link>
+          </div>
+        </Card>
+      )}
     </div>
   );
 }
