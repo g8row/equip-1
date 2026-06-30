@@ -12,38 +12,10 @@ import {
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import Toggle from "../components/ui/Toggle";
+import SignalBars from "../components/ui/SignalBars";
 
 function Unavailable({ children = "Unavailable on this device" }) {
   return <p className="muted-box">{children}</p>;
-}
-
-/** Four-bar signal strength indicator */
-function SignalBars({ bars }) {
-  return (
-    <span
-      style={{
-        display: "inline-flex",
-        alignItems: "flex-end",
-        gap: 2,
-        height: 14,
-        verticalAlign: "middle",
-      }}
-      aria-label={`Signal: ${bars} of 4 bars`}
-    >
-      {[1, 2, 3, 4].map((b) => (
-        <span
-          key={b}
-          style={{
-            display: "inline-block",
-            width: 3,
-            height: 3 + b * 2.5,
-            borderRadius: 1,
-            background: b <= bars ? "var(--ok)" : "var(--line-strong)",
-          }}
-        />
-      ))}
-    </span>
-  );
 }
 
 export default function Settings() {
@@ -210,7 +182,6 @@ export default function Settings() {
                         typeof n === "object"
                           ? (n.strength ?? n.signal ?? null)
                           : null;
-                      const bars = strength == null ? 0 : Math.ceil((strength / 100) * 4);
                       const isConnected =
                         name === (network?.wifi?.ssid || network?.ssid);
                       return (
@@ -231,7 +202,7 @@ export default function Settings() {
                               )}
                             </span>
                             {strength != null && (
-                              <SignalBars bars={bars} />
+                              <SignalBars strength={strength} />
                             )}
                           </span>
                           <Button size="sm" variant="ghost" onClick={() => setSsid(name)}>

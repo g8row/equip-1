@@ -56,13 +56,12 @@ Client = one React build shipped two ways: (a) embedded in `companion-api`, serv
 ### Repo layout
 ```
 companion/
-  server/                 # NEW Go backend (replaces api/ Python once parity-verified)
+  server/                 # Go backend (replaced the old Python api/, retired 2026-07-01)
     cmd/companion-api/ cmd/companion-net/
     internal/{config,logging,proc,encoders,capture,stream,recorder,files,sysinfo,network,provisioning,ble,httpapi}
     web/dist/             # React build copied here for //go:embed
   web/                    # React + Vite app (now multi-page + Nothing-OS)
-  api/                    # OLD Python backend — reference during port, retire after
-  deploy/systemd/         # unit files (to be created)
+  deploy/systemd/         # unit files
 ```
 
 ---

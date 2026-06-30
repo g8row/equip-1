@@ -5,10 +5,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/godbus/dbus/v5"
+
+	"equip1/companion/server/internal/network"
 )
 
 const (
@@ -45,7 +49,14 @@ type Provisioner interface {
 // NetworkController is satisfied by network.Manager.
 type NetworkController interface {
 	SetAP(enable bool, ssid, passphrase string) error
+	ScanWifi(ctx context.Context) ([]network.WifiNetwork, error)
 }
+
+// wifiScanCacheTTL controls how long cached scan results are served before a
+// read triggers a fresh background scan. ConnMan scans take several seconds —
+// far longer than a single characteristic read should block — so reads always
+// return immediately from cache while a stale cache triggers a refresh.
+const wifiScanCacheTTL = 20 * time.Second
 
 // Server owns the BlueZ advertisement and local GATT application.
 type Server struct {
@@ -64,6 +75,11 @@ type Server struct {
 	ticker  *time.Ticker
 	done    chan struct{}
 	started bool
+
+	scanMu      sync.Mutex
+	scanResults []byte
+	scanAt      time.Time
+	scanning    bool
 }
 
 // Options configures the BLE server.
@@ -167,7 +183,7 @@ func (s *Server) buildObjects() {
 		return s.netres.value, nil
 	}
 	wifiScan.read = func(ctx context.Context) ([]byte, *dbus.Error) {
-		return []byte(`{"networks":[],"err":"scan-not-implemented"}`), nil
+		return s.wifiScanPayload(), nil
 	}
 
 	objects := []managedObject{
@@ -359,6 +375,80 @@ func (s *Server) networkResult(state, msg string) *dbus.Error {
 		return dbus.MakeFailedError(fmt.Errorf("%s", msg))
 	}
 	return nil
+}
+
+// wifiScanPayload returns the cached scan JSON immediately, kicking off a
+// background refresh when the cache is empty or stale. Reads must never block
+// on the actual ConnMan scan (which can take several seconds) — the generic
+// characteristic read timeout in gatt.go is 2s.
+func (s *Server) wifiScanPayload() []byte {
+	if s.netCtl == nil {
+		return []byte(`{"networks":[],"scanning":false,"err":"network controller not available"}`)
+	}
+
+	s.scanMu.Lock()
+	stale := time.Since(s.scanAt) >= wifiScanCacheTTL
+	alreadyScanning := s.scanning
+	cached := s.scanResults
+	if stale && !alreadyScanning {
+		s.scanning = true
+	}
+	s.scanMu.Unlock()
+
+	if stale && !alreadyScanning {
+		go s.refreshWifiScan()
+	}
+
+	if cached != nil {
+		return cached
+	}
+	return []byte(`{"networks":[],"scanning":true,"err":null}`)
+}
+
+// refreshWifiScan runs a ConnMan scan in the background and caches the
+// result. Scans are not bounded by the per-read 2s timeout.
+func (s *Server) refreshWifiScan() {
+	defer func() {
+		s.scanMu.Lock()
+		s.scanning = false
+		s.scanMu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	nets, err := s.netCtl.ScanWifi(ctx)
+	if err != nil {
+		slog.Warn("ble-wifi-scan-failed", "error", err)
+		s.scanMu.Lock()
+		s.scanResults = []byte(fmt.Sprintf(`{"networks":[],"scanning":false,"err":%q}`, err.Error()))
+		s.scanAt = time.Now()
+		s.scanMu.Unlock()
+		return
+	}
+
+	// Strongest first; cap the list so the BLE payload stays small.
+	sort.Slice(nets, func(i, j int) bool { return nets[i].Strength > nets[j].Strength })
+	const maxNetworks = 12
+	if len(nets) > maxNetworks {
+		nets = nets[:maxNetworks]
+	}
+
+	payload, err := json.Marshal(map[string]any{
+		"networks": nets,
+		"scanning": false,
+		"err":      nil,
+	})
+	if err != nil {
+		payload = []byte(`{"networks":[],"scanning":false,"err":"marshal failed"}`)
+	}
+
+	s.scanMu.Lock()
+	s.scanResults = payload
+	s.scanAt = time.Now()
+	s.scanMu.Unlock()
+
+	slog.Info("ble-wifi-scan-complete", "count", len(nets))
 }
 
 func shortName(name string) string {

@@ -5,8 +5,16 @@ import { isNative } from "../lib/native";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import StatusDot from "../components/ui/StatusDot";
+import SignalBars from "../components/ui/SignalBars";
 
-// BLE states: null | 'scanning' | 'found' | 'connecting' | 'provisioning' | 'connected' | 'error'
+// BLE states:
+//   null | 'scanning' | 'found' | 'connecting'
+//   | 'wifi-scan' | 'wifi-select' | 'wifi-password' | 'wifi-joining'
+//   | 'provisioning' (manual AP-hotspot fallback)
+//   | 'connected' | 'error'
+
+const WIFI_SCAN_POLL_MS = 2500;
+const WIFI_SCAN_MAX_POLLS = 6; // ~15s total
 
 export default function Connect() {
   const navigate = useNavigate();
@@ -33,6 +41,11 @@ export default function Connect() {
   const [bleDevice, setBleDevice] = useState(null);
   const [bleStatus, setBleStatus] = useState(null);
   const [bleError, setBleError] = useState(null);
+  const [wifiNetworks, setWifiNetworks] = useState([]);
+  const [wifiScanError, setWifiScanError] = useState(null);
+  const [selectedSsid, setSelectedSsid] = useState(null);
+  const [wifiPsk, setWifiPsk] = useState("");
+  const [joinStatus, setJoinStatus] = useState(null); // "connecting" | "connected" | "error"
   const bleAbort = useRef(null);
 
   // Auto-navigate once connected
@@ -51,8 +64,7 @@ export default function Connect() {
     setBleDevice(null);
     setBleStatus(null);
 
-    const { bleInit, scanForDevice, connect, readStatus, writeApControl, disconnect } =
-      await import("../lib/ble.js");
+    const { bleInit, scanForDevice, connect, readStatus } = await import("../lib/ble.js");
 
     try {
       await bleInit();
@@ -91,6 +103,7 @@ export default function Connect() {
     } catch (err) {
       setBleError("Could not read device status: " + (err.message || String(err)));
       setBleState("error");
+      const { disconnect } = await import("../lib/ble.js");
       await disconnect(device.deviceId);
       return;
     }
@@ -99,18 +112,144 @@ export default function Connect() {
     if (statusData.ip && statusData.api) {
       setApiBase(statusData.api);
       await refresh(statusData.api);
+      const { disconnect } = await import("../lib/ble.js");
       await disconnect(device.deviceId);
       setBleState("connected");
       return;
     }
 
-    // No IP — enable AP on device and guide user to connect their phone
+    // No IP yet — start the BLE WiFi scan-and-select flow. Stay connected;
+    // the device needs the BLE link open to receive wifi_creds writes and
+    // send back network_result notifications.
+    await startWifiScan(device);
+  }
+
+  async function startWifiScan(device) {
+    setBleState("wifi-scan");
+    setWifiNetworks([]);
+    setWifiScanError(null);
+
+    const { readWifiScan } = await import("../lib/ble.js");
+
+    for (let attempt = 0; attempt < WIFI_SCAN_MAX_POLLS; attempt++) {
+      let result;
+      try {
+        result = await readWifiScan(device.deviceId);
+      } catch (err) {
+        setWifiScanError(err.message || "Could not read WiFi list");
+        break;
+      }
+      if (result.err) {
+        setWifiScanError(result.err);
+        break;
+      }
+      const nets = result.networks || [];
+      if (nets.length > 0 || !result.scanning) {
+        setWifiNetworks(nets);
+        break;
+      }
+      await new Promise((r) => setTimeout(r, WIFI_SCAN_POLL_MS));
+    }
+
+    setBleState("wifi-select");
+  }
+
+  async function rescanWifi() {
+    if (!bleDevice) return;
+    await startWifiScan(bleDevice);
+  }
+
+  function pickNetwork(ssid) {
+    setSelectedSsid(ssid);
+    setWifiPsk("");
+    setBleState("wifi-password");
+  }
+
+  async function joinSelectedNetwork(e) {
+    e.preventDefault();
+    if (!bleDevice || !selectedSsid) return;
+
+    const { writeWifiCreds, subscribeNetResult, readStatus, disconnect } = await import(
+      "../lib/ble.js"
+    );
+
+    setBleState("wifi-joining");
+    setJoinStatus("connecting");
+    setBleError(null);
+
+    let settled = false;
+    const finishOk = async () => {
+      if (settled) return;
+      settled = true;
+      try {
+        const fresh = await readStatus(bleDevice.deviceId);
+        if (fresh.ip && fresh.api) {
+          setApiBase(fresh.api);
+          await refresh(fresh.api);
+        }
+      } catch {
+        // Net result said connected but we couldn't re-read status over BLE —
+        // the LAN discovery flow below can still find it.
+      }
+      await disconnect(bleDevice.deviceId);
+      setBleState("connected");
+    };
+    const finishError = async (msg) => {
+      if (settled) return;
+      settled = true;
+      setBleError(msg || "Could not join that network");
+      setBleState("error");
+      await disconnect(bleDevice.deviceId).catch(() => {});
+    };
+
     try {
-      await writeApControl(device.deviceId, true);
+      await subscribeNetResult(bleDevice.deviceId, (result) => {
+        if (result.state === "connected") {
+          finishOk();
+        } else if (result.state === "error") {
+          finishError(result.err);
+        } else {
+          setJoinStatus(result.state || "connecting");
+        }
+      });
+    } catch {
+      // Notifications unavailable — fall back to the timeout-based status poll below.
+    }
+
+    try {
+      await writeWifiCreds(bleDevice.deviceId, selectedSsid, wifiPsk);
+    } catch (err) {
+      await finishError("Could not send WiFi credentials: " + (err.message || String(err)));
+      return;
+    }
+
+    // Safety net: if no notification arrives (BLE/WiFi coexistence on the
+    // single AIC8800 radio can be flaky right as the device joins a new
+    // network), poll status directly after a grace period.
+    setTimeout(async () => {
+      if (settled) return;
+      try {
+        const fresh = await readStatus(bleDevice.deviceId);
+        if (fresh.ip && fresh.api) {
+          finishOk();
+        } else {
+          finishError("Timed out waiting for the device to join " + selectedSsid);
+        }
+      } catch {
+        finishError("Timed out waiting for the device to join " + selectedSsid);
+      }
+    }, 20000);
+  }
+
+  async function useHotspotInstead() {
+    if (!bleDevice) return;
+    const { writeApControl, disconnect } = await import("../lib/ble.js");
+    try {
+      await writeApControl(bleDevice.deviceId, true);
     } catch {
       // Non-fatal — AP may already be on
     }
-    await disconnect(device.deviceId);
+    await disconnect(bleDevice.deviceId);
     setBleState("provisioning");
   }
 
@@ -135,6 +274,11 @@ export default function Connect() {
     setBleDevice(null);
     setBleStatus(null);
     setBleError(null);
+    setWifiNetworks([]);
+    setWifiScanError(null);
+    setSelectedSsid(null);
+    setWifiPsk("");
+    setJoinStatus(null);
   }
 
   // --- LAN discovery ------------------------------------------------------
@@ -331,7 +475,167 @@ export default function Connect() {
     );
   }
 
-  // AP provisioning — user must connect phone to equip-1 AP
+  // Scanning for nearby WiFi networks over BLE
+  if (bleState === "wifi-scan") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title="Looking for WiFi networks">
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "var(--sp-4)",
+              padding: "var(--sp-4) 0",
+            }}
+          >
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                border: "3px solid var(--accent)",
+                borderTopColor: "transparent",
+                borderRadius: "50%",
+                animation: "ble-spin 0.9s linear infinite",
+              }}
+            />
+            <style>{`@keyframes ble-spin { to { transform: rotate(360deg); } }`}</style>
+            <p className="dim" style={{ margin: 0, fontSize: "0.85rem" }}>
+              Asking the device to scan for nearby networks…
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // WiFi networks found over BLE — pick one
+  if (bleState === "wifi-select") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title="Choose a WiFi network">
+          <p className="dim" style={{ fontSize: "0.8rem", marginTop: 0 }}>
+            The device isn&apos;t on a network yet. Pick a WiFi network for it to join.
+          </p>
+          {wifiScanError && <div className="notice">{wifiScanError}</div>}
+          {wifiNetworks.length === 0 && !wifiScanError ? (
+            <p className="dim" style={{ fontSize: "0.82rem" }}>
+              No networks found nearby.
+            </p>
+          ) : (
+            <ul className="files-list">
+              {wifiNetworks.map((n) => (
+                <li key={n.ssid}>
+                  <button
+                    type="button"
+                    className="btn discovery-item"
+                    onClick={() => pickNetwork(n.ssid)}
+                  >
+                    <span className="data">{n.ssid}</span>
+                    {n.strength != null && <SignalBars strength={n.strength} />}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <div className="row-wrap" style={{ marginTop: "var(--sp-4)" }}>
+            <Button variant="ghost" size="sm" onClick={rescanWifi}>
+              Rescan
+            </Button>
+            <Button variant="ghost" size="sm" onClick={useHotspotInstead}>
+              Use device hotspot instead
+            </Button>
+            <Button variant="ghost" size="sm" onClick={cancelBle}>
+              Cancel
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Password entry for the selected network
+  if (bleState === "wifi-password") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title={selectedSsid}>
+          <form className="field-group" onSubmit={joinSelectedNetwork}>
+            <input
+              className="input"
+              type="password"
+              placeholder="Password (leave blank if open)"
+              value={wifiPsk}
+              onChange={(e) => setWifiPsk(e.target.value)}
+              autoFocus
+            />
+            <Button type="submit" variant="primary" block>
+              Join
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setBleState("wifi-select")}
+            >
+              Back
+            </Button>
+          </form>
+        </Card>
+      </div>
+    );
+  }
+
+  // Credentials sent — waiting for the device to join
+  if (bleState === "wifi-joining") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title={`Joining ${selectedSsid}`}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "var(--sp-4)",
+              padding: "var(--sp-4) 0",
+            }}
+          >
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                border: "3px solid var(--accent)",
+                borderTopColor: "transparent",
+                borderRadius: "50%",
+                animation: "ble-spin 0.9s linear infinite",
+              }}
+            />
+            <style>{`@keyframes ble-spin { to { transform: rotate(360deg); } }`}</style>
+            <p className="dim" style={{ margin: 0, fontSize: "0.85rem" }}>
+              {joinStatus === "connecting" ? "Connecting…" : joinStatus || "Working…"}
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // AP provisioning — user must connect phone to equip-1 AP (manual fallback)
   if (bleState === "provisioning") {
     return (
       <div className="stack">
@@ -342,7 +646,7 @@ export default function Connect() {
         <Card title="Connect to device hotspot">
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
             <p className="dim" style={{ margin: 0, fontSize: "0.85rem" }}>
-              The device is not on a WiFi network yet. It has started its hotspot.
+              The device has started its own hotspot instead.
               Open your phone&apos;s WiFi settings and connect to:
             </p>
             <div
