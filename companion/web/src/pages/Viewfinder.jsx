@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from "react";
 import { useServer } from "../context/ServerContext";
 import { getStreamUrl, getWhepUrl, startRecording, stopRecording } from "../api";
-import { formatDuration } from "../lib/format";
+import { formatDuration, formatBytes } from "../lib/format";
 import { streamIssue } from "../lib/stream";
 import WhepPlayer from "../components/WhepPlayer";
 import MjpegPlayer from "../components/MjpegPlayer";
@@ -25,6 +25,18 @@ export default function Viewfinder() {
   const streamUp = status?.stream?.mediamtx_running ?? false;
   const currentStreamIssue = streamIssue(status, streamMode);
 
+  const freeBytes = status?.storage?.free_bytes;
+  // Mirrors the backend's recorder thresholds (200MB blocks starting,
+  // 50MB auto-stops an in-progress recording) — warn before either bites.
+  const storageLevel =
+    freeBytes == null
+      ? null
+      : freeBytes < 50 * 1024 * 1024
+      ? "critical"
+      : freeBytes < 200 * 1024 * 1024
+      ? "low"
+      : null;
+
   async function onToggleRecording() {
     setLoading(true);
     try {
@@ -46,6 +58,14 @@ export default function Viewfinder() {
       </div>
 
       {error ? <div className="notice">{error}</div> : null}
+
+      {storageLevel && (
+        <div className="notice">
+          {storageLevel === "critical"
+            ? `Storage critically low — ${formatBytes(freeBytes)} free. Recording will auto-stop to avoid a corrupt file.`
+            : `Storage running low — ${formatBytes(freeBytes)} free. Delete some recordings soon.`}
+        </div>
+      )}
 
       <Card>
         <div className="card__head">

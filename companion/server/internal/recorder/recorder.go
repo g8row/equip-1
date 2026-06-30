@@ -13,6 +13,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"time"
 
 	"equip1/companion/server/internal/capture"
@@ -20,6 +21,19 @@ import (
 	"equip1/companion/server/internal/encoders"
 	"equip1/companion/server/internal/proc"
 	"equip1/companion/server/internal/stream"
+)
+
+const (
+	// minFreeBytesToStart blocks starting a new recording when free space is
+	// already this low — DV capture runs ~3.5MB/s; this is a few minutes of
+	// headroom, not a hard safety margin.
+	minFreeBytesToStart = 200 * 1024 * 1024
+	// minFreeBytesCritical auto-stops an in-progress recording before the
+	// disk fills completely and capture processes start failing mid-write.
+	minFreeBytesCritical = 50 * 1024 * 1024
+	// storageWatchInterval is how often the background watchdog checks free
+	// space while a recording is active.
+	storageWatchInterval = 10 * time.Second
 )
 
 // RecorderState manages recording lifecycle and state.
@@ -61,7 +75,7 @@ type Deps struct {
 
 // New constructs a RecorderState in the idle state.
 func New(d Deps) *RecorderState {
-	return &RecorderState{
+	r := &RecorderState{
 		captureDir:         d.CaptureDir,
 		captureMode:        d.CaptureMode,
 		mediamtx:           d.Mediamtx,
@@ -72,6 +86,39 @@ func New(d Deps) *RecorderState {
 		stopAllDirectMjpeg: d.StopAllDirectMjpeg,
 		mode:               "idle",
 		mjpegHub:           stream.NewHub("record-mjpeg-fanout"),
+	}
+	go r.storageWatchLoop()
+	return r
+}
+
+// freeBytes reports free space on the filesystem containing dir.
+func freeBytes(dir string) (uint64, error) {
+	var st syscall.Statfs_t
+	if err := syscall.Statfs(dir, &st); err != nil {
+		return 0, err
+	}
+	return st.Bavail * uint64(st.Bsize), nil
+}
+
+// storageWatchLoop runs for the life of the process, auto-stopping an
+// in-progress recording before the disk fills completely — a full disk mid-
+// write leaves a truncated/corrupt capture file and can wedge ffmpeg/dvgrab.
+func (r *RecorderState) storageWatchLoop() {
+	ticker := time.NewTicker(storageWatchInterval)
+	defer ticker.Stop()
+	for range ticker.C {
+		if !r.IsRecording() {
+			continue
+		}
+		free, err := freeBytes(r.captureDir)
+		if err != nil {
+			continue
+		}
+		if free < minFreeBytesCritical {
+			slog.Error("record-storage-critical-auto-stop",
+				"free_bytes", free, "threshold_bytes", minFreeBytesCritical)
+			r.Stop()
+		}
 	}
 }
 
@@ -113,6 +160,11 @@ func (r *RecorderState) Start() error {
 		if _, err := exec.LookPath("dvgrab"); err != nil {
 			return fmt.Errorf("dvgrab is not installed")
 		}
+	}
+
+	if free, err := freeBytes(r.captureDir); err == nil && free < minFreeBytesToStart {
+		return fmt.Errorf("Not enough free storage to start recording (%.0f MB free, need %.0f MB)",
+			float64(free)/1024/1024, float64(minFreeBytesToStart)/1024/1024)
 	}
 
 	selectedEncoder := encoders.SafeSelectedRTSPEncoder()
