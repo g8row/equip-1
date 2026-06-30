@@ -23,7 +23,7 @@ import (
 
 func main() {
 	cfg := config.Load()
-	logging.Setup(cfg.LogFile)
+	logging.Setup()
 
 	// ---- Singletons ----
 	netMgr, netErr := network.NewManager()

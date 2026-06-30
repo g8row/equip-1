@@ -18,7 +18,6 @@ type Config struct {
 	MediamtxRTSPURL  string
 	MediamtxWHEPPort int
 	MediamtxWHEPURL  string
-	LogFile          string
 	APIPort          int
 	APIBase          string // localhost base the net daemon uses to reach the API
 	StartupMode      string // "dvgrab" | "ffmpeg-only"
@@ -48,9 +47,6 @@ func Load() *Config {
 		apiPort = 8000
 	}
 
-	logFile := env("EQUIP_LOG_FILE", filepath.Join(captureDir, "companion-api.log"))
-	_ = os.MkdirAll(filepath.Dir(logFile), 0o755)
-
 	preferred := os.Getenv("EQUIP_FFMPEG_RTSP_VIDEO_ENCODER")
 	if preferred == "" {
 		preferred = os.Getenv("EQUIP_FFMPEG_H264_ENCODER")
@@ -67,7 +63,6 @@ func Load() *Config {
 		MediamtxRTSPURL:  env("EQUIP_MEDIAMTX_RTSP_URL", "rtsp://127.0.0.1:8554/live"),
 		MediamtxWHEPPort: whepPort,
 		MediamtxWHEPURL:  fmt.Sprintf("http://127.0.0.1:%d/live/whep", whepPort),
-		LogFile:          logFile,
 		APIPort:          apiPort,
 		APIBase:          fmt.Sprintf("http://127.0.0.1:%d", apiPort),
 		StartupMode:      startup,
