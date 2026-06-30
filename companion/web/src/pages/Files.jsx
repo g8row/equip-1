@@ -1,9 +1,23 @@
 import React, { useState } from "react";
 import { useServer } from "../context/ServerContext";
-import { deleteFile, getFileDownloadUrl } from "../api";
+import { deleteFile, getFileDownloadUrl, getThumbnailUrl } from "../api";
 import { formatBytes, formatDate } from "../lib/format";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
+
+function Thumbnail({ apiBase, name }) {
+  const [failed, setFailed] = useState(false);
+  if (failed) return null;
+  return (
+    <img
+      className="file-thumb"
+      src={getThumbnailUrl(apiBase, name)}
+      alt=""
+      loading="lazy"
+      onError={() => setFailed(true)}
+    />
+  );
+}
 
 export default function Files() {
   const { apiBase, files, status, refresh, setError } = useServer();
@@ -70,6 +84,7 @@ export default function Files() {
           <ul className="files-list">
             {files.map((file) => (
               <li key={`${file.name}-${file.modified_unix}`}>
+                <Thumbnail apiBase={apiBase} name={file.name} />
                 <span className="file-meta">
                   <span className="name">{file.name}</span>
                   <span className="label">

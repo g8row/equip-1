@@ -83,6 +83,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/files", s.handleFiles)
 	mux.HandleFunc("GET /api/files/download/{name}", s.handleDownload)
+	mux.HandleFunc("GET /api/files/thumbnail/{name}", s.handleThumbnail)
 	mux.HandleFunc("DELETE /api/files/{name}", s.handleDelete)
 	mux.HandleFunc("GET /api/storage", s.handleStorage)
 
@@ -316,6 +317,20 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", "attachment; filename=\""+name+"\"")
+	http.ServeFile(w, r, path)
+}
+
+// handleThumbnail serves a cached/lazily-generated JPEG frame grab for a
+// capture file. Generation can take a couple seconds on first request; the
+// result is cached on disk so subsequent loads are instant.
+func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	path, err := s.files.Thumbnail(name)
+	if err != nil {
+		s.writeFileError(w, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeFile(w, r, path)
 }
 

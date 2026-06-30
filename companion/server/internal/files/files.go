@@ -153,11 +153,13 @@ func (s *Store) Resolve(name string) (string, error) {
 	return candidate, nil
 }
 
-// Delete removes a capture file (guarded by the same path-traversal check).
+// Delete removes a capture file (guarded by the same path-traversal check)
+// and any cached thumbnail for it.
 func (s *Store) Delete(name string) error {
 	path, err := s.Resolve(name)
 	if err != nil {
 		return err
 	}
+	_ = os.Remove(filepath.Join(s.dir, ".thumbnails", name+".jpg"))
 	return os.Remove(path)
 }

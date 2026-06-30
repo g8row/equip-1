@@ -679,10 +679,19 @@ h2.display {
 .files-list li:first-child {
   border-top: 0;
 }
+.file-thumb {
+  width: 56px;
+  height: 42px;
+  object-fit: cover;
+  border-radius: var(--radius-sm);
+  background: var(--bg-deep);
+  flex: none;
+}
 .file-meta {
   display: flex;
   flex-direction: column;
   gap: 2px;
+  flex: 1;
   min-width: 0;
 }
 .file-meta .name {

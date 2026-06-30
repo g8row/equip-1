@@ -187,6 +187,11 @@ export function getFileDownloadUrl(base, name) {
   return `${safeBase}/api/files/download/${encodeURIComponent(name)}`;
 }
 
+export function getThumbnailUrl(base, name) {
+  const safeBase = normalizeBase(base) || DEFAULT_API_BASE;
+  return `${safeBase}/api/files/thumbnail/${encodeURIComponent(name)}`;
+}
+
 export function deleteFile(base, name) {
   return request(base, `/api/files/${encodeURIComponent(name)}`, {
     method: "DELETE",
