@@ -4,6 +4,7 @@ import {
   getNetwork,
   getPower,
   getRuntimeDebug,
+  restartServices,
   scanWifi,
   setAp,
   setRecordingCaptureMode,
@@ -27,6 +28,7 @@ export default function Settings() {
     streamMode,
     setStreamMode,
     setError,
+    refresh,
   } = useServer();
 
   const [network, setNetwork] = useState(null);
@@ -41,6 +43,7 @@ export default function Settings() {
   const [powerAvailable, setPowerAvailable] = useState(null);
   const [runtime, setRuntime] = useState(null);
   const [runtimeAvailable, setRuntimeAvailable] = useState(null);
+  const [restarting, setRestarting] = useState(false);
 
   const loadNetwork = useCallback(async () => {
     try {
@@ -118,6 +121,24 @@ export default function Settings() {
       await refreshCaptureMode(apiBase);
     } catch (err) {
       setError(err.message || "Failed to change capture mode");
+    }
+  }
+
+  async function onRestartServices() {
+    if (
+      !window.confirm(
+        "Restart BLE and streaming services? The live preview and any BLE connection will briefly drop."
+      )
+    )
+      return;
+    setRestarting(true);
+    try {
+      await restartServices(apiBase);
+      setTimeout(() => refresh(), 2500);
+    } catch (err) {
+      setError(err.message || "Restart failed");
+    } finally {
+      setRestarting(false);
     }
   }
 
@@ -302,6 +323,15 @@ export default function Settings() {
           <span className="kv__k">api</span>
           <span className="kv__v">{apiBase}</span>
         </div>
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={restarting}
+          onClick={onRestartServices}
+          style={{ marginTop: "var(--sp-3)" }}
+        >
+          {restarting ? "Restarting…" : "Restart BLE + streaming services"}
+        </Button>
       </Card>
 
       {/* About */}
@@ -325,7 +355,9 @@ export default function Settings() {
         </div>
         <div className="kv">
           <span className="kv__k">formats</span>
-          <span className="kv__v">MiniDV, DVCAM, DVCPRO, Digital8, HDV</span>
+          <span className="kv__v" style={{ wordBreak: "normal" }}>
+            MiniDV, DVCAM, DVCPRO, Digital8, HDV
+          </span>
         </div>
         <div className="row-wrap" style={{ marginTop: "var(--sp-3)" }}>
           <a

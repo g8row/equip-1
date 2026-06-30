@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"sync"
 	"time"
 
@@ -94,6 +95,7 @@ func (s *Server) Handler() http.Handler {
 
 	mux.HandleFunc("GET /api/debug/runtime", s.handleDebugRuntime)
 	mux.HandleFunc("GET /api/system/power", s.handleSystemPower)
+	mux.HandleFunc("POST /api/system/restart", s.handleSystemRestart)
 
 	mux.HandleFunc("GET /api/network", s.handleGetNetwork)
 	mux.HandleFunc("POST /api/network/wifi", s.handleSetWifi)
@@ -393,6 +395,23 @@ func (s *Server) handleDebugRuntime(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSystemPower(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sysinfo.Power())
+}
+
+// handleSystemRestart restarts companion-net (BLE/WiFi daemon) and mediamtx
+// via systemd — a remote fix for "BLE stopped advertising" or "stream is
+// wedged" without needing SSH. Deliberately does NOT restart companion-api
+// itself: this handler is running inside that process, and self-restarting
+// mid-request is a needless race to get right when force-quitting the app
+// already gives the user an equivalent "start over" for the API/UI side.
+func (s *Server) handleSystemRestart(w http.ResponseWriter, r *http.Request) {
+	cmd := exec.Command("systemctl", "restart", "companion-net", "mediamtx")
+	if err := cmd.Run(); err != nil {
+		slog.Error("system-restart-failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "Restart failed: "+err.Error())
+		return
+	}
+	slog.Info("system-restart", "services", "companion-net,mediamtx")
+	writeJSON(w, http.StatusOK, map[string]any{"restarted": []string{"companion-net", "mediamtx"}})
 }
 
 // nullableString returns nil for empty strings so JSON encodes null (matching

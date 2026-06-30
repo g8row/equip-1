@@ -226,6 +226,10 @@ export function getPower(base) {
   return request(base, "/api/system/power");
 }
 
+export function restartServices(base) {
+  return request(base, "/api/system/restart", { method: "POST" });
+}
+
 export function getRuntimeDebug(base) {
   return request(base, "/api/debug/runtime");
 }
