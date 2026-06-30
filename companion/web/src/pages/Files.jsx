@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { useServer } from "../context/ServerContext";
 import { deleteFile, getFileDownloadUrl, getThumbnailUrl } from "../api";
 import { formatBytes, formatDate } from "../lib/format";
+import { canShareNative, shareFile } from "../lib/share";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 
@@ -46,6 +47,7 @@ function Thumbnail({ apiBase, name }) {
 export default function Files() {
   const { apiBase, files, status, refresh, setError } = useServer();
   const [busy, setBusy] = useState("");
+  const [sharing, setSharing] = useState("");
 
   const storage = status?.storage ?? {};
   const usedPercent = Number(storage.used_percent ?? 0);
@@ -60,6 +62,20 @@ export default function Files() {
       setError(err.message || "Delete failed");
     } finally {
       setBusy("");
+    }
+  }
+
+  async function onShare(file) {
+    setSharing(file.name);
+    try {
+      await shareFile(getFileDownloadUrl(apiBase, file.name), file.name);
+    } catch (err) {
+      // User-cancelled share sheets reject too — don't surface those as errors.
+      if (!/cancel/i.test(err.message || "")) {
+        setError(err.message || "Share failed");
+      }
+    } finally {
+      setSharing("");
     }
   }
 
@@ -117,6 +133,16 @@ export default function Files() {
                   </span>
                 </span>
                 <span className="file-actions">
+                  {canShareNative(file.size_bytes) && (
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      disabled={sharing === file.name}
+                      onClick={() => onShare(file)}
+                    >
+                      {sharing === file.name ? "…" : "Share"}
+                    </Button>
+                  )}
                   <a
                     className="btn btn--sm"
                     href={getFileDownloadUrl(apiBase, file.name)}
