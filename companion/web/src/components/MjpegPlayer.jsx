@@ -1,6 +1,18 @@
 import React, { useEffect, useRef, useState } from "react";
 import Button from "./ui/Button";
 import { describeStreamFailure, streamIssue } from "../lib/stream";
+import { isNative } from "../lib/native";
+
+// Android WebView silently blocks a direct <img src="http://..."> cross-
+// protocol load (mixed content) even with MIXED_CONTENT_ALWAYS_ALLOW set —
+// verified against a live device via Chrome DevTools. fetch() to the same
+// URL works fine, but MJPEG is a true multipart/x-mixed-replace stream
+// chunked at arbitrary (non-frame-aligned) byte boundaries by ffmpeg, so the
+// blob-URL workaround used for Files page thumbnails doesn't apply here —
+// that needs a real multipart frame parser, not yet implemented. Surface a
+// clear message on native instead of the misleading "check your camera"
+// error, since onError fires immediately and for an unrelated reason.
+const MJPEG_BLOCKED_ON_NATIVE = isNative();
 
 /** MJPEG fallback player. Restartable; nonce busts the cached stream. */
 export default function MjpegPlayer({ streamUrl, active, status }) {
@@ -48,11 +60,16 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
   }, [active, preflightIssue, loaded, pipeline]);
 
   const src = active && !preflightIssue ? `${streamUrl}?t=${nonce}` : "";
+  const blockedOnNative = active && !preflightIssue && MJPEG_BLOCKED_ON_NATIVE;
 
   return (
     <div>
       <div className="viewer viewer--4-3">
-        {active && !preflightIssue ? (
+        {blockedOnNative ? (
+          <div className="viewer__placeholder">
+            MJPEG preview isn&apos;t supported in this app yet — use WebRTC instead
+          </div>
+        ) : active && !preflightIssue ? (
           <img
             className="viewer__media"
             src={src}
@@ -69,7 +86,7 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
             {preflightIssue || "Enable preview in Setup"}
           </div>
         )}
-        {active && !loaded && (
+        {active && !loaded && !blockedOnNative && (
           <div className="viewer__cover">
             <span className={`dot ${imgError ? "warn" : "warn"}`} />
             <span>{imgError ? "Stream error" : "Connecting…"}</span>
@@ -92,7 +109,7 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
             setLoaded(false);
             setNonce(Date.now());
           }}
-          disabled={!active || !!preflightIssue}
+          disabled={!active || !!preflightIssue || blockedOnNative}
         >
           Restart
         </Button>
