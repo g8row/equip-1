@@ -1,0 +1,15 @@
+[Unit]
+Description=MediaMTX RTSP/WHEP streaming server
+After=network.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/mediamtx /etc/mediamtx.yml
+Restart=on-failure
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,21 @@
+[Unit]
+Description=equip-1 Companion API
+After=network.target mediamtx.service
+Wants=mediamtx.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/companion-api
+Restart=on-failure
+RestartSec=3
+Environment=EQUIP_CAPTURE_DIR=/data/captures
+Environment=EQUIP_MEDIAMTX_BINARY=/usr/bin/mediamtx
+Environment=EQUIP_MEDIAMTX_RTSP_URL=rtsp://127.0.0.1:8554/live
+Environment=EQUIP_MEDIAMTX_WHEP_PORT=8889
+Environment=EQUIP_API_PORT=8000
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

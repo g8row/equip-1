@@ -1,4 +1,17 @@
-const DEFAULT_API_BASE = import.meta.env.VITE_API_BASE || "http://127.0.0.1:8000";
+const LOCALHOST_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1", ""]);
+
+function sameOriginBase() {
+  if (typeof window === "undefined" || !window.location) return null;
+  const { protocol, hostname, origin } = window.location;
+  if (!protocol || !protocol.startsWith("http")) return null;
+  // When the build is served by the device itself (a non-localhost origin),
+  // the API lives at the same origin — no LAN discovery needed.
+  if (LOCALHOST_HOSTS.has(hostname)) return null;
+  return normalizeBase(origin);
+}
+
+const DEFAULT_API_BASE =
+  import.meta.env.VITE_API_BASE || sameOriginBase() || "http://127.0.0.1:8000";
 
 export function getDefaultApiBase() {
   return DEFAULT_API_BASE;
@@ -172,4 +185,42 @@ export function getWhepUrl(base) {
 export function getFileDownloadUrl(base, name) {
   const safeBase = normalizeBase(base) || DEFAULT_API_BASE;
   return `${safeBase}/api/files/download/${encodeURIComponent(name)}`;
+}
+
+export function deleteFile(base, name) {
+  return request(base, `/api/files/${encodeURIComponent(name)}`, {
+    method: "DELETE",
+  });
+}
+
+// --- Network / system (may be unavailable on older firmwares) --------------
+
+export function getNetwork(base) {
+  return request(base, "/api/network");
+}
+
+export function setWifi(base, { ssid, psk }) {
+  return request(base, "/api/network/wifi", {
+    method: "POST",
+    body: JSON.stringify({ ssid, psk }),
+  });
+}
+
+export function setAp(base, on) {
+  return request(base, "/api/network/ap", {
+    method: "POST",
+    body: JSON.stringify({ enabled: !!on }),
+  });
+}
+
+export function scanWifi(base) {
+  return request(base, "/api/network/scan");
+}
+
+export function getPower(base) {
+  return request(base, "/api/system/power");
+}
+
+export function getRuntimeDebug(base) {
+  return request(base, "/api/debug/runtime");
 }

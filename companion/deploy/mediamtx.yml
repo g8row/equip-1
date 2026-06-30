@@ -1,0 +1,21 @@
+###############################################################################
+# mediamtx configuration for equip-1 companion
+# Minimal config: allow any source to publish, enable WebRTC/WHEP
+###############################################################################
+
+# Accept any path for both publishing and subscribing
+paths:
+  all_others:
+
+# WebRTC / WHEP
+webrtcAddress: :8889
+webrtcEncryption: no
+webrtcServerKey: server.key
+webrtcServerCert: server.crt
+webrtcLocalUDPAddress: :8189
+
+# RTSP
+rtspAddress: :8554
+
+# Logging
+logLevel: error

@@ -1,0 +1,184 @@
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import Button from "./ui/Button";
+import { describeStreamFailure, responseDetail, streamIssue } from "../lib/stream";
+
+/**
+ * WebRTC WHEP player. Connects to the companion API's WHEP signalling
+ * endpoint, attaches the remote stream, and aggressively seeks to the live
+ * edge to keep latency low. Auto-retries on 503 (stream warming up).
+ */
+export default function WhepPlayer({ whepUrl, active, status }) {
+  const videoRef = useRef(null);
+  const pcRef = useRef(null);
+  const retryTimerRef = useRef(null);
+  const retryCountRef = useRef(0);
+  const [state, setState] = useState("idle"); // idle | connecting | live | retrying | error
+  const [errorMsg, setErrorMsg] = useState("");
+
+  const preflightIssue = streamIssue(status, "webrtc");
+
+  const connect = useCallback(async () => {
+    if (!whepUrl || !active) return;
+    if (preflightIssue) {
+      setState("error");
+      setErrorMsg(preflightIssue);
+      return;
+    }
+    setState("connecting");
+    setErrorMsg("");
+
+    try {
+      if (pcRef.current) {
+        pcRef.current.close();
+        pcRef.current = null;
+      }
+
+      const pc = new RTCPeerConnection({
+        iceServers: [], // LAN only — no STUN needed
+        bundlePolicy: "max-bundle",
+      });
+      pcRef.current = pc;
+
+      pc.addTransceiver("video", { direction: "recvonly" });
+      pc.addTransceiver("audio", { direction: "recvonly" });
+
+      pc.ontrack = (event) => {
+        if (videoRef.current && event.streams[0]) {
+          videoRef.current.srcObject = event.streams[0];
+          retryCountRef.current = 0;
+          setState("live");
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+          setState("error");
+          setErrorMsg(`WebRTC connection ${pc.connectionState}`);
+        }
+      };
+
+      // Aggressive live-edge seeking to reduce playback buffer latency
+      if (videoRef.current) {
+        videoRef.current.addEventListener(
+          "progress",
+          () => {
+            const v = videoRef.current;
+            if (!v || !v.buffered.length) return;
+            const end = v.buffered.end(v.buffered.length - 1);
+            if (end - v.currentTime > 0.4) {
+              v.currentTime = end - 0.1;
+            }
+          },
+          { passive: true }
+        );
+      }
+
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      const res = await fetch(whepUrl, {
+        method: "POST",
+        headers: { "Content-Type": "application/sdp" },
+        body: offer.sdp,
+      });
+
+      // 503 = stream not ready yet (ffmpeg connecting to mediamtx); auto-retry
+      if (res.status === 503) {
+        const detail = await responseDetail(res);
+        const cameraFailure = describeStreamFailure("webrtc", detail);
+        if (cameraFailure !== detail) {
+          throw new Error(cameraFailure);
+        }
+        const MAX_RETRIES = 15;
+        const attempt = retryCountRef.current + 1;
+        if (attempt <= MAX_RETRIES) {
+          retryCountRef.current = attempt;
+          setState("retrying");
+          setErrorMsg(`Stream not ready — retrying (${attempt}/${MAX_RETRIES})…`);
+          retryTimerRef.current = setTimeout(connect, 4000);
+          return;
+        }
+      }
+
+      if (!res.ok) {
+        const detail = await responseDetail(res);
+        throw new Error(describeStreamFailure("webrtc", detail));
+      }
+
+      const answerSdp = await res.text();
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+    } catch (err) {
+      setState("error");
+      setErrorMsg(describeStreamFailure("webrtc", err.message));
+    }
+  }, [whepUrl, active, preflightIssue]);
+
+  const disconnect = useCallback(() => {
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+      retryTimerRef.current = null;
+    }
+    retryCountRef.current = 0;
+    if (pcRef.current) {
+      pcRef.current.close();
+      pcRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setState("idle");
+    setErrorMsg("");
+  }, []);
+
+  // Auto-connect when active; disconnect when not
+  useEffect(() => {
+    if (active) {
+      connect();
+    } else {
+      disconnect();
+    }
+    return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      if (pcRef.current) {
+        pcRef.current.close();
+        pcRef.current = null;
+      }
+    };
+  }, [active, whepUrl, preflightIssue]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const dotClass =
+    state === "live" ? "live" : state === "error" ? "warn" : state === "idle" ? "idle" : "warn";
+
+  return (
+    <div>
+      <div className="viewer">
+        <video
+          ref={videoRef}
+          autoPlay
+          muted
+          playsInline
+          className="viewer__media"
+        />
+        <div className="viewer__overlay">
+          <span className={`dot ${dotClass}`} />
+          {state}
+        </div>
+      </div>
+      {errorMsg && <p className="stream-error">{errorMsg}</p>}
+      <div className="viewer__toolbar">
+        <span className="label">webrtc · whep</span>
+        <div className="row-wrap">
+          <Button size="sm" onClick={connect} disabled={state === "connecting"}>
+            Reconnect
+          </Button>
+          <Button size="sm" variant="ghost" onClick={disconnect} disabled={state === "idle"}>
+            Disconnect
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}

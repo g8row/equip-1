@@ -1,0 +1,14 @@
+[Unit]
+Description=Unblock all rfkill-blocked radios (AIC8800 quirk)
+DefaultDependencies=no
+After=sysinit.target
+Before=bluetooth.service network.target
+ConditionPathExists=/dev/rfkill
+
+[Service]
+Type=oneshot
+ExecStart=/usr/sbin/rfkill unblock all
+RemainAfterExit=yes
+
+[Install]
+WantedBy=sysinit.target

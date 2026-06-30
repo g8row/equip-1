@@ -1,0 +1,52 @@
+/* ==========================================================================
+   Nothing-OS inspired design tokens
+   Monochrome canvas + a single restrained red accent.
+   ========================================================================== */
+:root {
+  /* Canvas */
+  --bg: #0b0b0b;
+  --bg-deep: #000000;
+  --surface: #101010;
+  --surface-2: #161616;
+
+  /* Ink */
+  --text: #f5f5f5;
+  --text-dim: #8a8a8a;
+  --text-faint: #5a5a5a;
+
+  /* Lines */
+  --line: #262626;
+  --line-strong: #3a3a3a;
+
+  /* Accent — used sparingly */
+  --accent: #cc1e1e;
+  --accent-soft: rgba(204, 30, 30, 0.16);
+  --accent-glow: rgba(204, 30, 30, 0.55);
+
+  /* Status */
+  --ok: #6fbf73;
+  --warn: #d6a544;
+
+  /* Fonts */
+  --font-display: "Doto", "IBM Plex Mono", ui-monospace, monospace;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+  /* Geometry */
+  --radius: 14px;
+  --radius-sm: 9px;
+  --radius-pill: 999px;
+
+  /* Spacing scale */
+  --sp-1: 0.25rem;
+  --sp-2: 0.5rem;
+  --sp-3: 0.75rem;
+  --sp-4: 1rem;
+  --sp-5: 1.5rem;
+  --sp-6: 2rem;
+
+  /* Dot-grid motif */
+  --dot: rgba(255, 255, 255, 0.06);
+  --dot-size: 22px;
+
+  color-scheme: dark;
+}

@@ -1,0 +1,17 @@
+[Unit]
+Description=equip-1 Companion BLE and Network daemon
+After=bluetooth.service dbus.service
+Wants=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/companion-net
+Restart=on-failure
+RestartSec=5
+Environment=EQUIP_API_BASE=http://127.0.0.1:8000
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
