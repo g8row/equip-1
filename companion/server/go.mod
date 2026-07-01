@@ -1,6 +1,6 @@
 module equip1/companion/server
 
-go 1.26.4
+go 1.26
 
 require (
 	github.com/godbus/dbus/v5 v5.2.2 // indirect
