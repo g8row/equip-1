@@ -8,10 +8,15 @@ import Button from "../components/ui/Button";
 import Thumbnail from "../components/Thumbnail";
 
 export default function Files() {
-  const { apiBase, files, status, refresh, setError } = useServer();
+  const { apiBase, files, status, reachable, error, refresh, setError } = useServer();
   const [busy, setBusy] = useState("");
   const [sharing, setSharing] = useState("");
 
+  // status/files default to their last-known values (or empty) while
+  // unreachable — without this, "0 B used" / "No recordings found yet."
+  // look exactly like a legitimately empty device instead of one we simply
+  // can't currently reach.
+  const offline = reachable === false;
   const storage = status?.storage ?? {};
   const usedPercent = Number(storage.used_percent ?? 0);
 
@@ -49,26 +54,34 @@ export default function Files() {
         <h1 className="display">Files</h1>
       </div>
 
+      {error ? <div className="notice">{error}</div> : null}
+
       <Card title="Disk usage">
-        <div className="bar" aria-label={`${usedPercent}% used`}>
-          <div className="bar__fill" style={{ width: `${Math.min(100, usedPercent)}%` }} />
-        </div>
-        <div style={{ marginTop: "var(--sp-3)" }}>
-          <div className="kv">
-            <span className="kv__k">used</span>
-            <span className="kv__v">
-              {formatBytes(storage.used_bytes ?? 0)} ({usedPercent}%)
-            </span>
-          </div>
-          <div className="kv">
-            <span className="kv__k">free</span>
-            <span className="kv__v">{formatBytes(storage.free_bytes ?? 0)}</span>
-          </div>
-          <div className="kv">
-            <span className="kv__k">total</span>
-            <span className="kv__v">{formatBytes(storage.total_bytes ?? 0)}</span>
-          </div>
-        </div>
+        {offline ? (
+          <p className="muted-box">Can&apos;t read storage — device unreachable.</p>
+        ) : (
+          <>
+            <div className="bar" aria-label={`${usedPercent}% used`}>
+              <div className="bar__fill" style={{ width: `${Math.min(100, usedPercent)}%` }} />
+            </div>
+            <div style={{ marginTop: "var(--sp-3)" }}>
+              <div className="kv">
+                <span className="kv__k">used</span>
+                <span className="kv__v">
+                  {formatBytes(storage.used_bytes ?? 0)} ({usedPercent}%)
+                </span>
+              </div>
+              <div className="kv">
+                <span className="kv__k">free</span>
+                <span className="kv__v">{formatBytes(storage.free_bytes ?? 0)}</span>
+              </div>
+              <div className="kv">
+                <span className="kv__k">total</span>
+                <span className="kv__v">{formatBytes(storage.total_bytes ?? 0)}</span>
+              </div>
+            </div>
+          </>
+        )}
       </Card>
 
       <Card
@@ -79,7 +92,9 @@ export default function Files() {
           </Button>
         }
       >
-        {files.length === 0 ? (
+        {offline ? (
+          <p className="muted-box">Can&apos;t load recordings — device unreachable.</p>
+        ) : files.length === 0 ? (
           <p className="dim" style={{ fontSize: "0.82rem" }}>
             No recordings found yet.
           </p>

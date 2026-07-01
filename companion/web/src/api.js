@@ -43,12 +43,46 @@ function normalizeBase(base) {
   return (base || "").trim().replace(/\/+$/, "");
 }
 
-async function request(base, path, options = {}) {
+// A fetch() failure (DNS, connection refused, or — the common case for a
+// powered-off/rebooting device — a TCP SYN that nothing ever answers, so the
+// browser's own connect timeout eventually fires) throws a bare TypeError
+// whose message is something unhelpful and browser-specific like "Failed to
+// fetch" (Chromium/WebView) or "Load failed" (Safari). None of that is
+// useful to show a user. Translate it once here so every api.js caller
+// benefits instead of leaking the raw error individually.
+function describeNetworkError(err) {
+  if (err && err.name === "AbortError") {
+    return "Timed out reaching the device — check it's powered on and on the same network.";
+  }
+  if (err instanceof TypeError) {
+    return "Can't reach the device — check it's powered on and on the same network.";
+  }
+  return (err && err.message) || "Request failed";
+}
+
+// Without an explicit timeout, a fetch() to a host that's fully unreachable
+// at the TCP level (not actively refusing — e.g. powered off, or dropped
+// packets) can hang for the platform's default connect timeout, which is
+// commonly 30+ seconds. That reads as a frozen app, not a clear error.
+const REQUEST_TIMEOUT_MS = 8000;
+
+async function request(base, path, { timeoutMs = REQUEST_TIMEOUT_MS, ...options } = {}) {
   const safeBase = normalizeBase(base) || DEFAULT_API_BASE;
-  const response = await fetch(`${safeBase}${path}`, {
-    headers: { "Content-Type": "application/json" },
-    ...options,
-  });
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response;
+  try {
+    response = await fetch(`${safeBase}${path}`, {
+      headers: { "Content-Type": "application/json" },
+      signal: controller.signal,
+      ...options,
+    });
+  } catch (err) {
+    throw new Error(describeNetworkError(err));
+  } finally {
+    clearTimeout(timeoutId);
+  }
 
   if (!response.ok) {
     const message = await response.text();
@@ -204,10 +238,15 @@ export function getNetwork(base) {
   return request(base, "/api/network");
 }
 
+// WiFi association / AP tethering negotiation (WPA handshake, DHCP lease,
+// ConnMan retries) can legitimately run longer than a quick status read.
+const NETWORK_OP_TIMEOUT_MS = 20000;
+
 export function setWifi(base, { ssid, psk }) {
   return request(base, "/api/network/wifi", {
     method: "POST",
     body: JSON.stringify({ ssid, psk }),
+    timeoutMs: NETWORK_OP_TIMEOUT_MS,
   });
 }
 
@@ -215,11 +254,12 @@ export function setAp(base, on) {
   return request(base, "/api/network/ap", {
     method: "POST",
     body: JSON.stringify({ enabled: !!on }),
+    timeoutMs: NETWORK_OP_TIMEOUT_MS,
   });
 }
 
 export function scanWifi(base) {
-  return request(base, "/api/network/scan");
+  return request(base, "/api/network/scan", { timeoutMs: NETWORK_OP_TIMEOUT_MS });
 }
 
 export function getPower(base) {

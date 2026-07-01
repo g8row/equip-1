@@ -20,8 +20,18 @@ export function streamIssue(status, mode) {
   return null;
 }
 
+// Raw browser network-error text ("Failed to fetch" in Chromium/WebView,
+// "Load failed" in Safari, "NetworkError when attempting to fetch resource"
+// in Firefox) is meaningless to a user — it just means the device wasn't
+// reachable at all, not an in-app stream problem. Catch it before any of
+// the more specific pattern checks below.
+const GENERIC_NETWORK_ERROR = /failed to fetch|load failed|networkerror/i;
+
 export function describeStreamFailure(mode, message = "") {
   const text = String(message || "").trim();
+  if (GENERIC_NETWORK_ERROR.test(text)) {
+    return "Can't reach the device — check it's powered on and on the same network.";
+  }
   if (text.includes("No AV/C devices found") || text.includes("no camera exists")) {
     return "No AV/C camera is responding. Power-cycle the DV camera and check the FireWire cable.";
   }

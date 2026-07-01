@@ -76,11 +76,23 @@ export default function WhepPlayer({ whepUrl, active, status }) {
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      const res = await fetch(whepUrl, {
-        method: "POST",
-        headers: { "Content-Type": "application/sdp" },
-        body: offer.sdp,
-      });
+      // Without a timeout, a fetch to a fully-unreachable host (powered off,
+      // dropped packets rather than an active refusal) can hang for the
+      // platform's default TCP connect timeout — commonly 30+ seconds,
+      // which reads as a frozen player rather than a clear error.
+      const offerController = new AbortController();
+      const offerTimeout = setTimeout(() => offerController.abort(), 8000);
+      let res;
+      try {
+        res = await fetch(whepUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/sdp" },
+          body: offer.sdp,
+          signal: offerController.signal,
+        });
+      } finally {
+        clearTimeout(offerTimeout);
+      }
 
       // 503 = stream not ready yet (ffmpeg connecting to mediamtx); auto-retry
       if (res.status === 503) {
@@ -109,7 +121,8 @@ export default function WhepPlayer({ whepUrl, active, status }) {
       await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
     } catch (err) {
       setState("error");
-      setErrorMsg(describeStreamFailure("webrtc", err.message));
+      const message = err.name === "AbortError" ? "Failed to fetch" : err.message;
+      setErrorMsg(describeStreamFailure("webrtc", message));
     }
   }, [whepUrl, active, preflightIssue]);
 
