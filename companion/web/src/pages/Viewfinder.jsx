@@ -93,7 +93,7 @@ export default function Viewfinder() {
       {error ? <div className="notice">{error}</div> : null}
 
       {storageLevel && (
-        <div className="notice">
+        <div className={`notice ${storageLevel === "critical" ? "notice--hazard" : ""}`}>
           {storageLevel === "critical"
             ? `Storage critically low — ${formatBytes(freeBytes)} free. Recording will auto-stop to avoid a corrupt file.`
             : `Storage running low — ${formatBytes(freeBytes)} free. Delete some recordings soon.`}

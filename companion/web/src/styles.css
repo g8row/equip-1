@@ -492,6 +492,33 @@ h2.display {
   font-size: 0.8rem;
 }
 
+/* Reserved for states that are actually about to bite (storage about to
+   force-stop a recording, etc.) — a hazard-stripe treatment, used sparingly
+   so it still reads as "this one's different" rather than decoration. */
+.notice--hazard {
+  position: relative;
+  overflow: hidden;
+  border-color: var(--accent);
+  background: var(--bg-deep);
+}
+.notice--hazard::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--accent) 0px,
+    var(--accent) 7px,
+    transparent 7px,
+    transparent 16px
+  );
+  opacity: 0.14;
+  pointer-events: none;
+}
+.notice--hazard > * {
+  position: relative;
+}
+
 .muted-box {
   border: 1px dashed var(--line-strong);
   border-radius: var(--radius-sm);
@@ -561,6 +588,27 @@ h2.display {
   background: #000;
 }
 
+/* Corner-bracket viewfinder framing — a quiet nod to camera HUD framing
+   (and to the app icon, which uses the same motif). Eight background-image
+   layers draw two 2px segments per corner; sits above the video/placeholder
+   but ignores pointer events so it never blocks the WHEP/MJPEG toolbar. */
+.viewer::after {
+  content: "";
+  position: absolute;
+  inset: 14px;
+  z-index: 2;
+  pointer-events: none;
+  background:
+    linear-gradient(to right, rgba(245, 245, 245, 0.4) 2px, transparent 2px) top left / 18px 2px no-repeat,
+    linear-gradient(to bottom, rgba(245, 245, 245, 0.4) 2px, transparent 2px) top left / 2px 18px no-repeat,
+    linear-gradient(to left, rgba(245, 245, 245, 0.4) 2px, transparent 2px) top right / 18px 2px no-repeat,
+    linear-gradient(to bottom, rgba(245, 245, 245, 0.4) 2px, transparent 2px) top right / 2px 18px no-repeat,
+    linear-gradient(to right, rgba(245, 245, 245, 0.4) 2px, transparent 2px) bottom left / 18px 2px no-repeat,
+    linear-gradient(to top, rgba(245, 245, 245, 0.4) 2px, transparent 2px) bottom left / 2px 18px no-repeat,
+    linear-gradient(to left, rgba(245, 245, 245, 0.4) 2px, transparent 2px) bottom right / 18px 2px no-repeat,
+    linear-gradient(to top, rgba(245, 245, 245, 0.4) 2px, transparent 2px) bottom right / 2px 18px no-repeat;
+}
+
 /* Pin the box to the DV camera's native 4:3 frame so there's no layout jump
    between the pre-connect placeholder and the first decoded video frame. */
 .viewer--4-3 {
@@ -582,6 +630,7 @@ h2.display {
   position: absolute;
   top: var(--sp-3);
   left: var(--sp-3);
+  z-index: 1;
   display: flex;
   align-items: center;
   gap: var(--sp-2);
@@ -599,6 +648,7 @@ h2.display {
 .viewer__cover {
   position: absolute;
   inset: 0;
+  z-index: 1;
   display: flex;
   align-items: center;
   justify-content: center;

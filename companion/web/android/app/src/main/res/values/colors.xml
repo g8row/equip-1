@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches the web UI's bg token. Used as the window background so the
+         very first frame (before the WebView attaches and paints its own
+         background) doesn't flash white/black. -->
+    <color name="appBackground">#0b0b0b</color>
+</resources>
