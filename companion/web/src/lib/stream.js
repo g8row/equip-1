@@ -44,6 +44,14 @@ export function describeStreamFailure(mode, message = "") {
   if (text.includes("Cannot reach mediamtx") || text.includes("mediamtx is not running")) {
     return "MediaMTX is not reachable. Restart the companion API or MediaMTX.";
   }
+  if (/path '.*' is not configured/.test(text)) {
+    // MediaMTX's own WHEP error, raw JSON — happens when it crash-loops
+    // (confirmed live: the companion API's mediamtx_running health check
+    // can read "true" from a brief up-window between restarts, so the
+    // header shows "stream ready" right up until the actual WHEP request
+    // hits MediaMTX mid-crash and gets this back).
+    return "MediaMTX isn't ready yet. Restart streaming services in Settings.";
+  }
   if (mode === "mjpeg") {
     return "MJPEG produced no frames. Check camera power/cable, then restart the stream.";
   }
