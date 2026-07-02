@@ -29,8 +29,9 @@ export default function WhepPlayer({ whepUrl, active, status }) {
 
     try {
       if (pcRef.current) {
-        pcRef.current.close();
-        pcRef.current = null;
+        const old = pcRef.current;
+        pcRef.current = null; // null first so its close event is ignored
+        old.close();
       }
 
       const pc = new RTCPeerConnection({
@@ -51,27 +52,15 @@ export default function WhepPlayer({ whepUrl, active, status }) {
       };
 
       pc.onconnectionstatechange = () => {
-        if (pc.connectionState === "failed" || pc.connectionState === "closed") {
+        // Ignore events from a PeerConnection we've already replaced or closed
+        // on purpose (reconnect / retry / disconnect null out pcRef first), so a
+        // deliberate close doesn't flash a spurious "Stream error".
+        if (pc !== pcRef.current) return;
+        if (pc.connectionState === "failed") {
           setState("error");
-          setErrorMsg(`WebRTC connection ${pc.connectionState}`);
+          setErrorMsg("WebRTC connection failed");
         }
       };
-
-      // Aggressive live-edge seeking to reduce playback buffer latency
-      if (videoRef.current) {
-        videoRef.current.addEventListener(
-          "progress",
-          () => {
-            const v = videoRef.current;
-            if (!v || !v.buffered.length) return;
-            const end = v.buffered.end(v.buffered.length - 1);
-            if (end - v.currentTime > 0.4) {
-              v.currentTime = end - 0.1;
-            }
-          },
-          { passive: true }
-        );
-      }
 
       const offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
@@ -133,8 +122,9 @@ export default function WhepPlayer({ whepUrl, active, status }) {
     }
     retryCountRef.current = 0;
     if (pcRef.current) {
-      pcRef.current.close();
+      const old = pcRef.current;
       pcRef.current = null;
+      old.close();
     }
     if (videoRef.current) {
       videoRef.current.srcObject = null;
@@ -156,11 +146,27 @@ export default function WhepPlayer({ whepUrl, active, status }) {
         retryTimerRef.current = null;
       }
       if (pcRef.current) {
-        pcRef.current.close();
+        const old = pcRef.current;
         pcRef.current = null;
+        old.close();
       }
     };
   }, [active, whepUrl, preflightIssue]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Live-edge seek: attached once so it isn't re-added on every reconnect/retry
+  // (which would stack listeners fighting over currentTime). Reads the current
+  // video element each time it fires.
+  useEffect(() => {
+    const v = videoRef.current;
+    if (!v) return undefined;
+    const onProgress = () => {
+      if (!v.buffered.length) return;
+      const end = v.buffered.end(v.buffered.length - 1);
+      if (end - v.currentTime > 0.4) v.currentTime = end - 0.1;
+    };
+    v.addEventListener("progress", onProgress, { passive: true });
+    return () => v.removeEventListener("progress", onProgress);
+  }, []);
 
   const dotClass =
     state === "live" ? "live" : state === "error" ? "warn" : state === "idle" ? "idle" : "warn";
@@ -182,6 +188,7 @@ export default function WhepPlayer({ whepUrl, active, status }) {
           muted
           playsInline
           className="viewer__media"
+          aria-label="Live camera preview"
         />
         {state !== "live" && (
           <div className="viewer__cover">

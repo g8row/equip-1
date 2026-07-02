@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
 import { isNative } from "../lib/native";
 import { hapticNotification } from "../lib/haptics";
+import { pskError } from "../lib/wifi";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import StatusDot from "../components/ui/StatusDot";
@@ -115,8 +116,10 @@ export default function Connect() {
       return;
     }
 
-    // If device already has an IP, connect directly
-    if (statusData.ip && statusData.api) {
+    // The device reporting an IP does NOT mean this phone can reach it — a
+    // board on a different WiFi than the phone reports an IP that is
+    // unroutable from here. Probe it before claiming connected.
+    if (statusData.ip && statusData.api && (await probeServer(statusData.api))) {
       setApiBase(statusData.api);
       await refresh(statusData.api);
       const { disconnect } = await import("../lib/ble.js");
@@ -125,10 +128,11 @@ export default function Connect() {
       return;
     }
 
-    // No IP yet — start the BLE WiFi scan-and-select flow. Stay connected;
-    // the device needs the BLE link open to receive wifi_creds writes and
-    // send back network_result notifications.
-    await startWifiScan(device);
+    // Not reachable on a shared LAN. Offer the connection routes; the device
+    // hosting its own AP is the primary path (see doApHandoff). The BLE
+    // "provision the device onto your WiFi" route stays available as an
+    // alternative. Keep the BLE link open — both routes need it.
+    setBleState("choose-route");
   }
 
   async function startWifiScan(device) {
@@ -175,6 +179,7 @@ export default function Connect() {
   async function joinSelectedNetwork(e) {
     e.preventDefault();
     if (!bleDevice || !selectedSsid) return;
+    if (pskError(wifiPsk)) return; // guard the Enter-key submit path
 
     const { writeWifiCreds, subscribeNetResult, readStatus, disconnect } = await import(
       "../lib/ble.js"
@@ -248,35 +253,168 @@ export default function Connect() {
     }, 20000);
   }
 
-  async function useHotspotInstead() {
+  // Primary handoff: tell the device to host its own AP, then join it from the
+  // phone. On a single-radio device the AP and station modes are mutually
+  // exclusive, so this is also how a phone with no shared network reaches the
+  // device at all. Uses WifiNetworkSpecifier under the hood (one system-dialog
+  // tap) with app-traffic binding so AP_GATEWAY is reachable.
+  async function doApHandoff() {
     if (!bleDevice) return;
-    const { writeApControl, disconnect } = await import("../lib/ble.js");
+    setBleError(null);
+
+    const { writeApControl, disconnect, readWifiScan } = await import("../lib/ble.js");
+    const { joinDeviceAp, AP_GATEWAY, AP_SSID } = await import("../lib/wifi.js");
+
+    setBleState("starting-ap");
+
+    // Pre-fetch the WiFi list over BLE *before* the AP starts. The single-radio
+    // chip can't scan while hosting the AP, so this is our only chance to get a
+    // network list for the optional "connect device to WiFi" step later. Best
+    // effort — if it fails, that step falls back to manual SSID entry.
+    try {
+      for (let i = 0; i < 3; i++) {
+        const res = await readWifiScan(bleDevice.deviceId);
+        if ((res.networks && res.networks.length) || !res.scanning) {
+          setWifiNetworks(res.networks || []);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, 1800));
+      }
+    } catch {
+      // No pre-scan list — manual entry remains available.
+    }
+
+    // 1. Ask the device to start its hotspot (over the still-open BLE link).
     try {
       await writeApControl(bleDevice.deviceId, true);
     } catch {
-      // Non-fatal — AP may already be on
+      // Non-fatal — the AP may already be up. We'll find out when we try to join.
     }
+    // The device needs a moment to bring the AP + DHCP up before we join.
+    await new Promise((r) => setTimeout(r, 2500));
     await disconnect(bleDevice.deviceId);
-    setBleState("provisioning");
-  }
 
-  async function onApConnected() {
-    // User says they connected to equip-1 AP — set the AP gateway address
-    const apBase = "http://192.168.1.1:8000";
-    setApiBase(apBase);
-    setManualServer(apBase);
-    const ok = await refresh(apBase);
+    // 2. Join the hotspot from the phone (system dialog).
+    setBleState("joining-ap");
+    if (!isNative()) {
+      // Web/dev build: no WiFi control. Fall back to the manual instructions.
+      setBleState("provisioning");
+      return;
+    }
+    try {
+      await joinDeviceAp();
+    } catch (err) {
+      setBleError(
+        `Couldn't join the ${AP_SSID} hotspot: ${err.message || String(err)}. ` +
+          `You can join it manually in WiFi settings (password in the app), then retry.`
+      );
+      setBleState("error");
+      return;
+    }
+
+    // 3. Reach the device at the AP gateway.
+    setApiBase(AP_GATEWAY);
+    setManualServer(AP_GATEWAY);
+    const ok = await refresh(AP_GATEWAY);
     if (ok) {
-      setBleState("connected");
+      setBleState("ap-connected");
     } else {
       setBleError(
-        "Could not reach " + apBase + " — make sure your phone is connected to the equip-1 WiFi network."
+        `Joined ${AP_SSID} but couldn't reach the device at ${AP_GATEWAY}. ` +
+          `Try again, or reconnect over Bluetooth.`
       );
       setBleState("error");
     }
   }
 
+  // After the phone joins the AP, the user may leave the device on the AP
+  // (done) or provision it onto a WiFi network for a normal LAN connection.
+  async function useApAsIs() {
+    setBleState("connected");
+  }
+
+  // Manual fallback (web build, or the plugin join failed): the user joined
+  // the equip-1 AP themselves in WiFi settings and tapped "I'm connected".
+  async function onApConnectedManual() {
+    const { AP_GATEWAY } = await import("../lib/wifi.js");
+    setApiBase(AP_GATEWAY);
+    setManualServer(AP_GATEWAY);
+    const ok = await refresh(AP_GATEWAY);
+    if (ok) {
+      setBleState("ap-connected");
+    } else {
+      setBleError(
+        `Could not reach the device at ${AP_GATEWAY} — make sure your phone is on the equip-1 WiFi.`
+      );
+      setBleState("error");
+    }
+  }
+
+  // --- Provision the device onto a WiFi network, over the AP (HTTP) ---------
+  // Note: on this single-radio device, applying WiFi creds drops the AP (the
+  // radio switches AP→station), so the phone loses the 192.168.0.1 link and the
+  // HTTP request won't return. That's expected; we guide the user to rejoin the
+  // chosen network and re-find the device on the LAN.
+
+  function pickNetworkAp(ssid) {
+    setSelectedSsid(ssid);
+    setWifiPsk("");
+    setBleState("ap-wifi-password");
+  }
+
+  async function provisionOverAp(e) {
+    e?.preventDefault();
+    if (!selectedSsid) return;
+    if (pskError(wifiPsk)) return; // guard the Enter-key submit path
+    const ssid = selectedSsid;
+    const psk = wifiPsk;
+    setBleError(null);
+    setBleState("ap-provisioning");
+    // Fire-and-forget: the AP drops mid-request as the device switches to
+    // station mode, so the response usually never arrives. Swallow the error.
+    const { setWifi } = await import("../api.js");
+    setWifi(apiBase, { ssid, psk }).catch(() => {});
+  }
+
+  // After the user rejoins the provisioned network, find the device on the LAN.
+  async function findAfterProvision() {
+    setBleError(null);
+    setIsDiscovering(true);
+    try {
+      const candidates = candidateServers();
+      for (const base of candidates) {
+        if (await probeServer(base)) {
+          setApiBase(base);
+          setManualServer(base);
+          await refresh(base);
+          setBleState("connected");
+          return;
+        }
+      }
+      const found = await discoverServers({
+        seeds: [window.location.hostname, ...candidates],
+      });
+      if (found.length > 0) {
+        setApiBase(found[0].base);
+        setManualServer(found[0].base);
+        await refresh(found[0].base);
+        setBleState("connected");
+        return;
+      }
+      setBleError(
+        `Couldn't find the device on "${selectedSsid}" yet. Make sure your phone is on that network, then try again.`
+      );
+    } finally {
+      setIsDiscovering(false);
+    }
+  }
+
   function cancelBle() {
+    // If we joined the device AP, release the binding so the phone falls back
+    // to its normal network. Fire-and-forget — never blocks the UI reset.
+    if (bleState === "ap-connected" || bleState === "joining-ap") {
+      import("../lib/wifi.js").then((m) => m.leaveDeviceAp()).catch(() => {});
+    }
     setBleState(null);
     setBleDevice(null);
     setBleStatus(null);
@@ -328,10 +466,16 @@ export default function Connect() {
   }
 
   async function applyManual() {
-    const base = manualServer.trim().replace(/\/+$/, "");
+    let base = manualServer.trim().replace(/\/+$/, "");
     if (!base) {
       setError("Enter a server URL first");
       return;
+    }
+    // Accept a bare host/IP (e.g. "192.168.1.5:8000") — the device API is plain
+    // HTTP, so assume http:// rather than failing on a scheme-less relative URL.
+    if (!/^https?:\/\//i.test(base)) {
+      base = `http://${base}`;
+      setManualServer(base);
     }
     if (!(await probeServer(base))) {
       setError(`Cannot reach ${base}/health`);
@@ -482,6 +626,258 @@ export default function Connect() {
     );
   }
 
+  // Device found over BLE but not reachable on a shared LAN — choose a route.
+  // Device-hosted AP is the primary path; provisioning onto an existing WiFi
+  // over BLE is the alternative.
+  if (bleState === "choose-route") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title="How do you want to connect?">
+          <p className="dim" style={{ fontSize: "0.82rem", marginTop: 0 }}>
+            The device isn&apos;t on your network. Join its own hotspot for a direct
+            link, or put it on a WiFi network you both share.
+          </p>
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-3)" }}>
+            <Button variant="primary" block onClick={doApHandoff}>
+              Join device hotspot
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => startWifiScan(bleDevice)}>
+              Connect device to a WiFi network
+            </Button>
+            <Button variant="ghost" size="sm" onClick={cancelBle}>
+              Cancel
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Telling the device to start its AP (over BLE).
+  if (bleState === "starting-ap" || bleState === "joining-ap") {
+    const joining = bleState === "joining-ap";
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title={joining ? "Joining device hotspot" : "Starting device hotspot"}>
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              alignItems: "center",
+              gap: "var(--sp-4)",
+              padding: "var(--sp-4) 0",
+            }}
+          >
+            <div
+              style={{
+                width: 40,
+                height: 40,
+                border: "3px solid var(--accent)",
+                borderTopColor: "transparent",
+                borderRadius: "50%",
+                animation: "ble-spin 0.9s linear infinite",
+              }}
+            />
+            <style>{`@keyframes ble-spin { to { transform: rotate(360deg); } }`}</style>
+            <p className="dim" style={{ margin: 0, fontSize: "0.85rem", textAlign: "center" }}>
+              {joining
+                ? "Approve the WiFi prompt to join equip-1…"
+                : "Asking the device to start its hotspot…"}
+            </p>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Joined the AP and reached the device — offer to use it as-is or provision
+  // it onto a WiFi network.
+  if (bleState === "ap-connected") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title="Connected over hotspot">
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
+            <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)" }}>
+              <StatusDot state="ok" />
+              <span className="data" style={{ fontSize: "0.85rem" }}>
+                {apiBase}
+              </span>
+            </div>
+            <p className="dim" style={{ margin: 0, fontSize: "0.82rem" }}>
+              You&apos;re connected directly to the device. Use it now, or connect it
+              to a WiFi network so you don&apos;t need the hotspot next time.
+            </p>
+            <Button variant="primary" block onClick={useApAsIs}>
+              View Dashboard
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setBleState("ap-wifi-select")}
+            >
+              Connect device to a WiFi network
+            </Button>
+            <Button variant="ghost" size="sm" onClick={cancelBle}>
+              Disconnect
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
+  // Over the AP: pick a WiFi network for the device to join (list was
+  // pre-fetched over BLE before the AP started; single-radio can't rescan now).
+  if (bleState === "ap-wifi-select") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title="Choose a WiFi network for the device">
+          <p className="dim" style={{ fontSize: "0.8rem", marginTop: 0 }}>
+            The device will join this network and leave its hotspot. 2.4GHz
+            networks work best.
+          </p>
+          {wifiNetworks.length === 0 ? (
+            <p className="dim" style={{ fontSize: "0.82rem" }}>
+              No network list available — enter a network name below.
+            </p>
+          ) : (
+            <ul className="files-list">
+              {wifiNetworks.map((n) => (
+                <li key={n.ssid}>
+                  <button
+                    type="button"
+                    className="btn discovery-item"
+                    onClick={() => pickNetworkAp(n.ssid)}
+                  >
+                    <span className="data">{n.ssid}</span>
+                    {n.strength != null && <SignalBars strength={n.strength} />}
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          <form
+            className="field-group"
+            style={{ marginTop: "var(--sp-4)" }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              if (selectedSsid) setBleState("ap-wifi-password");
+            }}
+          >
+            <input
+              className="input"
+              type="text"
+              placeholder="Or type a network name (SSID)"
+              aria-label="WiFi network name"
+              value={selectedSsid || ""}
+              onChange={(e) => setSelectedSsid(e.target.value)}
+            />
+            <Button type="submit" variant="ghost" size="sm" disabled={!selectedSsid}>
+              Use this network
+            </Button>
+          </form>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setBleState("ap-connected")}
+          >
+            Back
+          </Button>
+        </Card>
+      </div>
+    );
+  }
+
+  // Over the AP: password for the chosen network.
+  if (bleState === "ap-wifi-password") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title={selectedSsid}>
+          <form className="field-group" onSubmit={provisionOverAp}>
+            <input
+              className="input"
+              type="password"
+              placeholder="Password (leave blank if open)"
+              aria-label="WiFi password"
+              value={wifiPsk}
+              onChange={(e) => setWifiPsk(e.target.value)}
+              autoFocus
+            />
+            {pskError(wifiPsk) && (
+              <p className="dim" style={{ fontSize: "0.75rem", margin: 0, color: "var(--warn)" }}>
+                {pskError(wifiPsk)}
+              </p>
+            )}
+            <Button type="submit" variant="primary" block disabled={!!pskError(wifiPsk)}>
+              Connect device
+            </Button>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setBleState("ap-wifi-select")}
+            >
+              Back
+            </Button>
+          </form>
+        </Card>
+      </div>
+    );
+  }
+
+  // Over the AP: creds sent; the device drops the AP to join. Guide the user to
+  // rejoin the chosen network, then re-find the device on the LAN.
+  if (bleState === "ap-provisioning") {
+    return (
+      <div className="stack">
+        <div className="page-head">
+          <span className="label">pairing</span>
+          <h1 className="display">Connect</h1>
+        </div>
+        <Card title="Device is switching networks">
+          <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
+            <p className="dim" style={{ margin: 0, fontSize: "0.85rem" }}>
+              The device is leaving its hotspot to join{" "}
+              <span className="data">{selectedSsid}</span>. Its hotspot will
+              disappear.
+            </p>
+            <ol className="dim" style={{ margin: 0, fontSize: "0.82rem", paddingLeft: "1.1rem" }}>
+              <li>Connect your phone to <span className="data">{selectedSsid}</span>.</li>
+              <li>Then tap Find device below.</li>
+            </ol>
+            {bleError && <div className="notice">{bleError}</div>}
+            <Button variant="primary" block onClick={findAfterProvision} disabled={isDiscovering}>
+              {isDiscovering ? "Searching…" : "Find device"}
+            </Button>
+            <Button variant="ghost" size="sm" onClick={cancelBle}>
+              Cancel
+            </Button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   // Scanning for nearby WiFi networks over BLE
   if (bleState === "wifi-scan") {
     return (
@@ -557,7 +953,7 @@ export default function Connect() {
             <Button variant="ghost" size="sm" onClick={rescanWifi}>
               Rescan
             </Button>
-            <Button variant="ghost" size="sm" onClick={useHotspotInstead}>
+            <Button variant="ghost" size="sm" onClick={doApHandoff}>
               Use device hotspot instead
             </Button>
             <Button variant="ghost" size="sm" onClick={cancelBle}>
@@ -583,11 +979,17 @@ export default function Connect() {
               className="input"
               type="password"
               placeholder="Password (leave blank if open)"
+              aria-label="WiFi password"
               value={wifiPsk}
               onChange={(e) => setWifiPsk(e.target.value)}
               autoFocus
             />
-            <Button type="submit" variant="primary" block>
+            {pskError(wifiPsk) && (
+              <p className="dim" style={{ fontSize: "0.75rem", margin: 0, color: "var(--warn)" }}>
+                {pskError(wifiPsk)}
+              </p>
+            )}
+            <Button type="submit" variant="primary" block disabled={!!pskError(wifiPsk)}>
               Join
             </Button>
             <Button
@@ -679,7 +1081,7 @@ export default function Connect() {
             <p className="dim" style={{ margin: 0, fontSize: "0.8rem" }}>
               Once connected, tap the button below.
             </p>
-            <Button variant="primary" onClick={onApConnected}>
+            <Button variant="primary" onClick={onApConnectedManual}>
               I&apos;m connected
             </Button>
             <Button variant="ghost" size="sm" onClick={cancelBle}>
@@ -805,6 +1207,7 @@ export default function Connect() {
             value={manualServer}
             onChange={(e) => setManualServer(e.target.value)}
             placeholder="http://192.168.x.x:8000"
+            aria-label="Device address"
           />
           <Button onClick={applyManual}>Use</Button>
         </div>

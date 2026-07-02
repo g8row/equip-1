@@ -3,6 +3,8 @@ package com.equip1.companion;
 import android.graphics.Color;
 import android.os.Bundle;
 import android.webkit.WebSettings;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsControllerCompat;
 import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
@@ -24,5 +26,14 @@ public class MainActivity extends BridgeActivity {
             .setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
         getBridge().getWebView().setBackgroundColor(APP_BG);
         getWindow().getDecorView().setBackgroundColor(APP_BG);
+
+        // Under edge-to-edge the bar backgrounds are the WebView (dark), so the
+        // status/nav glyphs must be *light* to be visible. Appearance flags are
+        // still honored on SDK 35+ even though bar colors are not. false = not
+        // light-appearance = light icons on a dark bar.
+        WindowInsetsControllerCompat insets =
+            WindowCompat.getInsetsController(getWindow(), getWindow().getDecorView());
+        insets.setAppearanceLightStatusBars(false);
+        insets.setAppearanceLightNavigationBars(false);
     }
 }

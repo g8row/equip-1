@@ -20,7 +20,8 @@ import Button from "../components/ui/Button";
 import StatusDot from "../components/ui/StatusDot";
 
 export default function Viewfinder() {
-  const { apiBase, status, files, refresh, setError, error, streamMode } = useServer();
+  const { apiBase, status, files, refresh, setError, error, streamMode, setStreamMode, reachable } =
+    useServer();
   const [sharing, setSharing] = useState(false);
 
   const [loading, setLoading] = useState(false);
@@ -35,6 +36,15 @@ export default function Viewfinder() {
   const mjpegUrl = useMemo(() => getStreamUrl(apiBase), [apiBase]);
   const streamUp = status?.stream?.mediamtx_running ?? false;
   const currentStreamIssue = streamIssue(status, streamMode);
+  // WebRTC can be unavailable (e.g. no WHEP-capable encoder) while MJPEG still
+  // works from the same camera. Rather than send the user to Settings, offer a
+  // one-tap switch right where the problem shows, as long as the camera is
+  // present. MJPEG now works on native too (MjpegPlayer parses the stream and
+  // renders blob-URL frames), so this is offered on all platforms.
+  const canFallbackToMjpeg =
+    streamMode === "webrtc" &&
+    status?.stream?.whep_available === false &&
+    status?.stream?.requirements?.camera_present !== false;
 
   const freeBytes = status?.storage?.free_bytes;
   // Mirrors the backend's recorder thresholds (200MB blocks starting,
@@ -49,6 +59,20 @@ export default function Viewfinder() {
       : null;
 
   const lastFile = !isRecording && files.length > 0 ? files[0] : null;
+
+  // Don't offer Record when the backend would just reject the start: it blocks
+  // starting below 200MB free (storageLevel != null), needs a camera, and needs
+  // to be reachable. Stop, however, must always stay available once recording.
+  const noCamera = status?.stream?.requirements?.camera_present === false;
+  const startBlockedReason =
+    reachable === false
+      ? "Device unreachable."
+      : noCamera
+      ? "No FireWire camera detected."
+      : storageLevel != null
+      ? "Not enough free storage to start."
+      : null;
+  const recordDisabled = loading || (!isRecording && startBlockedReason != null);
 
   async function onShareLast() {
     if (!lastFile) return;
@@ -115,7 +139,19 @@ export default function Viewfinder() {
         </div>
 
         {currentStreamIssue ? (
-          <div className="stream-notice">{currentStreamIssue}</div>
+          <div className="stream-notice">
+            {currentStreamIssue}
+            {canFallbackToMjpeg && (
+              <Button
+                size="sm"
+                variant="ghost"
+                onClick={() => setStreamMode("mjpeg")}
+                style={{ marginTop: "var(--sp-2)" }}
+              >
+                Switch to MJPEG
+              </Button>
+            )}
+          </div>
         ) : null}
 
         {streamMode === "webrtc" && (
@@ -149,11 +185,16 @@ export default function Viewfinder() {
           <Button
             variant={isRecording ? "primary" : "accent"}
             onClick={onToggleRecording}
-            disabled={loading}
+            disabled={recordDisabled}
           >
             {isRecording ? "Stop" : "Record"}
           </Button>
         </div>
+        {!isRecording && startBlockedReason && (
+          <p className="dim" style={{ fontSize: "0.75rem", margin: "var(--sp-2) 0 0" }}>
+            Can&apos;t record: {startBlockedReason}
+          </p>
+        )}
       </Card>
 
       {lastFile && (

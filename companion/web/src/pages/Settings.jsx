@@ -14,6 +14,7 @@ import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import Toggle from "../components/ui/Toggle";
 import SignalBars from "../components/ui/SignalBars";
+import { pskError } from "../lib/wifi";
 
 function Unavailable({ children = "Unavailable on this device" }) {
   return <p className="muted-box">{children}</p>;
@@ -29,6 +30,7 @@ export default function Settings() {
     setStreamMode,
     setError,
     refresh,
+    reachable,
   } = useServer();
 
   const [network, setNetwork] = useState(null);
@@ -90,7 +92,7 @@ export default function Settings() {
 
   async function onConnectWifi(e) {
     e.preventDefault();
-    if (!ssid) return;
+    if (!ssid || pskError(psk)) return;
     setWifiBusy(true);
     try {
       await setWifi(apiBase, { ssid, psk });
@@ -104,6 +106,16 @@ export default function Settings() {
   }
 
   async function onToggleAp(on) {
+    // Turning the hotspot off while we're connected *through* it severs this
+    // very session. Make the user confirm rather than silently dropping them.
+    if (!on && onAp) {
+      if (
+        !window.confirm(
+          "You're connected over the device hotspot. Turning it off will end this connection. Continue?"
+        )
+      )
+        return;
+    }
     setApBusy(true);
     try {
       await setAp(apiBase, on);
@@ -145,6 +157,14 @@ export default function Settings() {
   const apOn = !!(network?.ap?.enabled ?? network?.ap_enabled);
   const isRecording = status?.recorder?.mode === "recording";
   const scanList = Array.isArray(scanResults) ? scanResults : [];
+  // Single-radio device: the chip is EITHER an AP or a WiFi station, never
+  // both. If we reached the device over its own hotspot, joining a WiFi network
+  // (or toggling the AP off) will drop this very connection. Surface that.
+  const onAp = !!apiBase && apiBase.includes("192.168.0.1");
+  // Actions that hit the device API are pointless (and just error) when it's
+  // unreachable. reachable is null while the first probe is in flight — treat
+  // only an explicit false as offline so we don't disable during startup.
+  const offline = reachable === false;
 
   return (
     <div className="stack">
@@ -241,6 +261,7 @@ export default function Settings() {
               <input
                 className="input"
                 placeholder="SSID"
+                aria-label="WiFi network name"
                 value={ssid}
                 onChange={(e) => setSsid(e.target.value)}
               />
@@ -248,13 +269,37 @@ export default function Settings() {
                 className="input"
                 type="password"
                 placeholder="Password"
+                aria-label="WiFi password"
                 value={psk}
                 onChange={(e) => setPsk(e.target.value)}
               />
-              <Button type="submit" variant="primary" disabled={wifiBusy || !ssid}>
+              {pskError(psk) && (
+                <p className="dim" style={{ fontSize: "0.75rem", margin: 0, color: "var(--warn)" }}>
+                  {pskError(psk)}
+                </p>
+              )}
+              <Button
+                type="submit"
+                variant="primary"
+                disabled={wifiBusy || !ssid || !!pskError(psk)}
+              >
                 {wifiBusy ? "Connecting…" : "Connect"}
               </Button>
             </form>
+            <p className="dim" style={{ fontSize: "0.75rem", marginTop: "var(--sp-2)" }}>
+              The device joins one network at a time. 2.4GHz networks work best —
+              5GHz isn&apos;t supported yet.
+              {onAp && (
+                <>
+                  {" "}
+                  <strong style={{ color: "var(--warn)" }}>
+                    You&apos;re connected over the device hotspot — joining a WiFi
+                    network will end this connection. Rejoin that network on your
+                    phone afterward.
+                  </strong>
+                </>
+              )}
+            </p>
           </>
         )}
       </Card>
@@ -264,19 +309,32 @@ export default function Settings() {
         {networkAvailable === false ? (
           <Unavailable />
         ) : (
-          <Toggle
-            label={apOn ? "broadcasting" : "off"}
-            checked={apOn}
-            disabled={apBusy}
-            onChange={onToggleAp}
-          />
+          <>
+            <Toggle
+              label={apOn ? "broadcasting" : "off"}
+              checked={apOn}
+              disabled={apBusy}
+              onChange={onToggleAp}
+            />
+            <p className="dim" style={{ fontSize: "0.75rem", marginTop: "var(--sp-2)" }}>
+              The device has one radio: the hotspot and WiFi can&apos;t run at
+              once. Turning the hotspot on drops any WiFi connection;
+              {onAp
+                ? " turning it off will end this connection."
+                : " turning it off returns the device to WiFi."}
+            </p>
+          </>
         )}
       </Card>
 
       {/* Stream + capture defaults */}
-      <Card title="Stream default">
+      <Card title="Preview &amp; capture">
         <div className="field-group">
+          <label className="label" htmlFor="stream-mode">
+            Live preview
+          </label>
           <select
+            id="stream-mode"
             className="select"
             value={streamMode}
             onChange={(e) => setStreamMode(e.target.value)}
@@ -285,15 +343,28 @@ export default function Settings() {
             <option value="mjpeg">MJPEG (fallback)</option>
             <option value="off">Off</option>
           </select>
+
+          <label className="label" htmlFor="capture-mode" style={{ marginTop: "var(--sp-3)" }}>
+            Recording capture
+          </label>
           <select
+            id="capture-mode"
             className="select"
             value={captureModeConfig?.current_mode ?? "dvgrab"}
             onChange={(e) => onChangeCaptureMode(e.target.value)}
-            disabled={isRecording}
+            disabled={isRecording || offline}
           >
-            <option value="dvgrab">Capture: dvgrab + ffmpeg</option>
-            <option value="ffmpeg-only">Capture: ffmpeg only</option>
+            <option value="dvgrab">Shared with preview (default)</option>
+            <option value="ffmpeg-only">Separate recorder</option>
           </select>
+          <p className="dim" style={{ fontSize: "0.75rem", marginTop: "var(--sp-2)" }}>
+            Advanced. &ldquo;Shared&rdquo; records through the same pipeline as the
+            live preview; &ldquo;Separate&rdquo; runs an independent recorder. Both
+            save lossless DV.
+            {offline
+              ? " Connect to the device to change this."
+              : isRecording && " Stop recording to change this."}
+          </p>
         </div>
       </Card>
 
@@ -326,11 +397,15 @@ export default function Settings() {
         <Button
           size="sm"
           variant="ghost"
-          disabled={restarting}
+          disabled={restarting || offline}
           onClick={onRestartServices}
           style={{ marginTop: "var(--sp-3)" }}
         >
-          {restarting ? "Restarting…" : "Restart BLE + streaming services"}
+          {restarting
+            ? "Restarting…"
+            : offline
+            ? "Restart services (device offline)"
+            : "Restart BLE + streaming services"}
         </Button>
       </Card>
 

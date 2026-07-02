@@ -1,6 +1,7 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
+import { setRecordingBar } from "../lib/systemBars";
 import StatusDot from "./ui/StatusDot";
 
 // 3x3 dot-matrix glyphs — keeps the Nothing-OS dot aesthetic while giving
@@ -33,6 +34,11 @@ function DotGrid({ glyph }) {
 export default function AppShell() {
   const { status, apiBase, reachable } = useServer();
   const isRecording = status?.recorder?.mode === "recording";
+
+  // Tint the native status bar red while recording — a system-level REC cue.
+  useEffect(() => {
+    setRecordingBar(isRecording);
+  }, [isRecording]);
 
   let serverState = "warn";
   let serverLabel = "connecting";

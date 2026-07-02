@@ -18,26 +18,46 @@ export async function bleInit() {
   await BleClient.initialize({ androidNeverForLocation: true });
 }
 
+// Device advertised name. Matched as a fallback because service-UUID scan
+// filtering is unreliable on this hardware: the AIC8800 can't do BT5 extended
+// advertising, so BlueZ's own connectable advertisement (name + standard 16-bit
+// UUIDs) competes on-air with companion-net's legacy HCI advertisement (which
+// carries our 128-bit service UUID). A phone doing a UUID-filtered scan often
+// only catches BlueZ's packet and never matches. The device *name* is present
+// in every packet, so we scan unfiltered and match on name OR service UUID.
+const DEVICE_NAME = 'equip-1';
+
 export async function scanForDevice(onFound, timeoutMs = 15000) {
   const BleClient = await getBle();
   return new Promise((resolve, reject) => {
     let found = null;
+
+    const matches = (result) => {
+      const name = result.device?.name || result.localName || '';
+      if (name === DEVICE_NAME) return true;
+      const uuids = result.device?.uuids || result.uuids || [];
+      return uuids.some((u) => String(u).toLowerCase() === SERVICE_UUID);
+    };
+
+    const accept = (result) => {
+      if (found) return;
+      found = result.device;
+      clearTimeout(timer);
+      BleClient.stopLEScan().catch(() => {});
+      if (onFound) onFound(result.device);
+      resolve(result.device);
+    };
+
     const timer = setTimeout(() => {
       BleClient.stopLEScan().catch(() => {});
       if (!found) reject(new Error('No equip-1 device found nearby'));
     }, timeoutMs);
 
-    BleClient.requestLEScan(
-      { services: [SERVICE_UUID], allowDuplicates: false },
-      (result) => {
-        if (found) return;
-        found = result.device;
-        clearTimeout(timer);
-        BleClient.stopLEScan().catch(() => {});
-        if (onFound) onFound(result.device);
-        resolve(result.device);
-      }
-    ).catch(reject);
+    // Unfiltered scan (no `services`): on this hardware a UUID filter misses the
+    // packet that actually carries our UUID. We filter in the callback instead.
+    BleClient.requestLEScan({ allowDuplicates: true }, (result) => {
+      if (matches(result)) accept(result);
+    }).catch(reject);
   });
 }
 

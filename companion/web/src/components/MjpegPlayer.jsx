@@ -2,23 +2,22 @@ import React, { useEffect, useRef, useState } from "react";
 import Button from "./ui/Button";
 import { describeStreamFailure, streamIssue } from "../lib/stream";
 import { isNative } from "../lib/native";
+import { startMjpegStream } from "../lib/mjpeg";
 
-// Android WebView silently blocks a direct <img src="http://..."> cross-
-// protocol load (mixed content) even with MIXED_CONTENT_ALWAYS_ALLOW set —
-// verified against a live device via Chrome DevTools. fetch() to the same
-// URL works fine, but MJPEG is a true multipart/x-mixed-replace stream
-// chunked at arbitrary (non-frame-aligned) byte boundaries by ffmpeg, so the
-// blob-URL workaround used for Files page thumbnails doesn't apply here —
-// that needs a real multipart frame parser, not yet implemented. Surface a
-// clear message on native instead of the misleading "check your camera"
-// error, since onError fires immediately and for an unrelated reason.
-const MJPEG_BLOCKED_ON_NATIVE = isNative();
+// The Android WebView silently blocks a direct cross-protocol
+// <img src="http://..."> load (mixed content) even with
+// MIXED_CONTENT_ALWAYS_ALLOW. So on native we don't point <img> at the stream
+// URL — instead we fetch() the multipart mpjpeg stream, parse it into per-frame
+// JPEG blob: URLs (see lib/mjpeg.js), and feed those to <img>, which is not
+// blocked. On the web the plain streaming <img src> works and is used directly.
+const NATIVE = isNative();
 
 /** MJPEG fallback player. Restartable; nonce busts the cached stream. */
 export default function MjpegPlayer({ streamUrl, active, status }) {
   const [nonce, setNonce] = useState(Date.now());
   const [imgError, setImgError] = useState("");
   const [loaded, setLoaded] = useState(false);
+  const [frameUrl, setFrameUrl] = useState(""); // native: current blob: URL
   const lastFrameAtRef = useRef(0);
 
   const preflightIssue = streamIssue(status, "mjpeg");
@@ -34,13 +33,46 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
     setImgError(preflightIssue || "");
     setLoaded(false);
     lastFrameAtRef.current = 0;
-    if (preflightIssue) return undefined;
+    return undefined;
+  }, [active, preflightIssue]);
 
-    const timeoutId = setTimeout(() => {
+  // No-first-frame timeout: armed only until the first frame loads (adding
+  // `loaded` to the deps clears it once we're live, instead of firing a false
+  // error on a stream that's actually working).
+  useEffect(() => {
+    if (!active || preflightIssue || loaded) return undefined;
+    const id = setTimeout(() => {
       setImgError((current) => current || describeStreamFailure("mjpeg"));
     }, 12000);
-    return () => clearTimeout(timeoutId);
-  }, [active, preflightIssue]);
+    return () => clearTimeout(id);
+  }, [active, preflightIssue, loaded]);
+
+  // Native: fetch + parse the multipart mpjpeg stream into blob-URL frames (the
+  // WebView blocks a direct cross-protocol <img src="http://...">). Re-runs when
+  // `nonce` changes (Restart button, or the pipeline-dead watchdog below).
+  useEffect(() => {
+    if (!NATIVE || !active || preflightIssue) return undefined;
+    const stop = startMjpegStream(streamUrl, {
+      onFrame: (url) => {
+        lastFrameAtRef.current = Date.now();
+        setLoaded(true);
+        setImgError("");
+        setFrameUrl((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          return url;
+        });
+      },
+      onError: (err) => setImgError(describeStreamFailure("mjpeg", err?.message)),
+      onEnd: () => setImgError((c) => c || describeStreamFailure("mjpeg")),
+    });
+    return () => {
+      stop();
+      setFrameUrl((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        return "";
+      });
+    };
+  }, [active, preflightIssue, nonce, streamUrl]);
 
   // Watchdog: the browser doesn't reliably fire <img onerror> when a
   // multipart/x-mixed-replace stream's underlying connection is closed by
@@ -59,20 +91,22 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
     return () => clearTimeout(id);
   }, [active, preflightIssue, loaded, pipeline]);
 
-  const src = active && !preflightIssue ? `${streamUrl}?t=${nonce}` : "";
-  const blockedOnNative = active && !preflightIssue && MJPEG_BLOCKED_ON_NATIVE;
+  const streaming = active && !preflightIssue;
+  // Web: point <img> straight at the multipart stream (works off-native). Native:
+  // src comes from the parsed blob-URL frames set by the effect above.
+  const webSrc = streaming && !NATIVE ? `${streamUrl}?t=${nonce}` : "";
 
   return (
     <div>
       <div className="viewer viewer--4-3">
-        {blockedOnNative ? (
-          <div className="viewer__placeholder">
-            MJPEG preview isn&apos;t supported in this app yet — use WebRTC instead
-          </div>
-        ) : active && !preflightIssue ? (
+        {streaming && NATIVE ? (
+          frameUrl ? (
+            <img className="viewer__media" src={frameUrl} alt="Camera preview" />
+          ) : null
+        ) : streaming ? (
           <img
             className="viewer__media"
-            src={src}
+            src={webSrc}
             alt="Camera preview"
             onError={() => setImgError(describeStreamFailure("mjpeg"))}
             onLoad={() => {
@@ -86,9 +120,9 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
             {preflightIssue || "Enable preview in Setup"}
           </div>
         )}
-        {active && !loaded && !blockedOnNative && (
+        {active && !loaded && (
           <div className="viewer__cover">
-            <span className={`dot ${imgError ? "warn" : "warn"}`} />
+            <span className="dot warn" />
             <span>{imgError ? "Stream error" : "Connecting…"}</span>
           </div>
         )}
@@ -109,7 +143,7 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
             setLoaded(false);
             setNonce(Date.now());
           }}
-          disabled={!active || !!preflightIssue || blockedOnNative}
+          disabled={!active || !!preflightIssue}
         >
           Restart
         </Button>
