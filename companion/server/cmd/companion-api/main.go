@@ -35,7 +35,7 @@ func main() {
 	}
 
 	captureMode := config.NewCaptureMode(cfg.StartupMode)
-	mediamtx := stream.NewMediamtxManager(cfg.MediamtxBinary)
+	mediamtx := stream.NewMediamtxManager(cfg.MediamtxBinary, cfg.MediamtxConfig)
 	broadcaster := stream.NewMjpegBroadcaster(cfg.MediamtxRTSPURL)
 	seamless := stream.NewSeamlessDvHub(mediamtx, cfg.MediamtxRTSPURL)
 	directMjpeg := stream.NewDirectMjpegManager()

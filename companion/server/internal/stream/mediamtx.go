@@ -15,6 +15,7 @@ import (
 // availability check.
 type MediamtxManager struct {
 	binary string
+	config string // optional path to mediamtx.yml
 
 	mu               sync.Mutex
 	process          *proc.Proc
@@ -22,10 +23,15 @@ type MediamtxManager struct {
 	restartCooldown  time.Duration
 }
 
-// NewMediamtxManager returns a manager for the given mediamtx binary name.
-func NewMediamtxManager(binary string) *MediamtxManager {
+// NewMediamtxManager returns a manager for the given mediamtx binary name and
+// an optional config path. mediamtx only reads a config from its CWD by default
+// (never /etc), so without an explicit path it silently falls back to an empty
+// config that rejects RTSP publishing (WHEP 400) — passing the path is what
+// makes WHEP work. Empty config keeps mediamtx's built-in defaults.
+func NewMediamtxManager(binary, config string) *MediamtxManager {
 	return &MediamtxManager{
 		binary:          binary,
+		config:          config,
 		restartCooldown: 5 * time.Second,
 	}
 }
@@ -61,7 +67,12 @@ func (m *MediamtxManager) Start() bool {
 		return false
 	}
 
-	cmd := exec.Command(m.binary)
+	var cmd *exec.Cmd
+	if m.config != "" {
+		cmd = exec.Command(m.binary, m.config)
+	} else {
+		cmd = exec.Command(m.binary)
+	}
 	// stdout → DEVNULL (Stdout left nil discards output).
 	er, ew, err := proc.NewStderrPipe(cmd)
 	if err != nil {

@@ -38,6 +38,14 @@ const (
 	appPath     dbus.ObjectPath = "/com/equip1/companion"
 	servicePath dbus.ObjectPath = "/com/equip1/companion/service0"
 	adPath      dbus.ObjectPath = "/com/equip1/companion/advertisement0"
+
+	// apPassphrase secures the device's own WiFi hotspot (the AP-handoff
+	// fallback when the phone can't reach the device over BLE/LAN). ConnMan
+	// refuses to enable tethering with an empty passphrase (it silently stays
+	// off — Tethering=False, wlan0 never leaves managed mode), so this must be
+	// a valid WPA2 key (8-63 chars). It is shown to the user verbatim on the
+	// app's provisioning screen — keep it in sync with web/src/pages/Connect.jsx.
+	apPassphrase = "equip1device"
 )
 
 // Provisioner is satisfied by provisioning.Manager; kept as an interface to
@@ -169,7 +177,7 @@ func (s *Server) buildObjects() {
 			return dbus.MakeFailedError(fmt.Errorf("missing AP command"))
 		}
 		enable := value[0] != 0
-		if err := s.netCtl.SetAP(enable, s.name, ""); err != nil {
+		if err := s.netCtl.SetAP(enable, s.name, apPassphrase); err != nil {
 			return s.networkResult("error", err.Error())
 		}
 		if enable {

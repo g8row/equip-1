@@ -27,33 +27,48 @@ func newLegacyAdvertiser(hciDev string) *legacyAdvertiser {
 }
 
 // Start configures and enables LE advertising with the given device name and
-// 128-bit service UUID.  name is truncated to 7 chars to fit the 31-byte
-// primary advertisement packet alongside flags.  The full 128-bit service UUID
-// is placed in the scan-response packet.
+// 128-bit service UUID.
+//
+// The 128-bit service UUID goes in the PRIMARY advertising packet, not the
+// scan-response: Android's ScanFilter.setServiceUuid (which the companion app
+// uses) matches against the primary ADV data, and a UUID placed only in the
+// scan-response is silently missed by filtered scans — that was the cause of
+// flaky/failed discovery. Layout of the 31-byte primary packet:
+//   Flags (3) + complete 128-bit service UUID (18) + as much of the name as
+//   fits (2 + nameLen). For "equip-1" that's 3+18+9 = 30 bytes. The full name
+//   also goes in the scan-response so longer names still resolve.
 func (a *legacyAdvertiser) Start(name, svcUUID string) error {
 	if _, err := exec.LookPath("hcitool"); err != nil {
 		return fmt.Errorf("hcitool not found — cannot set up legacy LE advertising")
 	}
 
-	// Build primary advertising data (max 31 significant bytes):
-	//   Flags:       02 01 06  (LE general discoverable, BR/EDR not supported)
-	//   Local name:  [len] 09 [name bytes]
-	nameBytes := []byte(name)
-	if len(nameBytes) > 19 {
-		nameBytes = nameBytes[:19]
-	}
-	// AD entry: length byte + type (0x09) + name
-	nameAD := append([]byte{byte(len(nameBytes) + 1), 0x09}, nameBytes...)
-	flagsAD := []byte{0x02, 0x01, 0x06}
-	advData := append(flagsAD, nameAD...)
-
-	// Build scan-response data: 128-bit service UUID in little-endian
 	uuidLE, err := uuid128LE(svcUUID)
 	if err != nil {
 		return fmt.Errorf("encode service uuid: %w", err)
 	}
-	// AD entry: length=17 (1 type + 16 UUID bytes), type=0x07 (complete 128-bit UUIDs)
-	svcAD := append([]byte{0x11, 0x07}, uuidLE...)
+
+	nameBytes := []byte(name)
+
+	// Primary ADV: flags + 128-bit service UUID (type 0x07), then the name if it
+	// still fits within the 31-byte budget.
+	flagsAD := []byte{0x02, 0x01, 0x06}          // 3 bytes
+	svcAD := append([]byte{0x11, 0x07}, uuidLE...) // 18 bytes (len 17 + this byte)
+	advData := append(append([]byte{}, flagsAD...), svcAD...)
+	if room := 31 - len(advData) - 2; room > 0 {
+		primaryName := nameBytes
+		if len(primaryName) > room {
+			primaryName = primaryName[:room]
+		}
+		advData = append(advData, append([]byte{byte(len(primaryName) + 1), 0x09}, primaryName...)...)
+	}
+
+	// Scan-response: the full device name (0x09), so longer names are still
+	// readable even when truncated in the primary packet.
+	scanName := nameBytes
+	if len(scanName) > 29 {
+		scanName = scanName[:29]
+	}
+	scanRspData := append([]byte{byte(len(scanName) + 1), 0x09}, scanName...)
 
 	// Disable advertising before reconfiguring (status 0x0C = Command Disallowed
 	// if parameters are changed while advertising is active).
@@ -74,7 +89,7 @@ func (a *legacyAdvertiser) Start(name, svcUUID string) error {
 		return fmt.Errorf("set adv data: %w", err)
 	}
 
-	if err := a.hciCmd("0x08", "0x0009", buildAdvPayload(svcAD)...); err != nil {
+	if err := a.hciCmd("0x08", "0x0009", buildAdvPayload(scanRspData)...); err != nil {
 		return fmt.Errorf("set scan rsp: %w", err)
 	}
 

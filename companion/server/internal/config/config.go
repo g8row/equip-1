@@ -15,6 +15,7 @@ import (
 type Config struct {
 	CaptureDir       string
 	MediamtxBinary   string
+	MediamtxConfig   string // path to mediamtx.yml; empty = spawn with mediamtx's defaults
 	MediamtxRTSPURL  string
 	MediamtxWHEPPort int
 	MediamtxWHEPURL  string
@@ -60,6 +61,7 @@ func Load() *Config {
 	return &Config{
 		CaptureDir:       captureDir,
 		MediamtxBinary:   env("EQUIP_MEDIAMTX_BINARY", "mediamtx"),
+		MediamtxConfig:   os.Getenv("EQUIP_MEDIAMTX_CONFIG"),
 		MediamtxRTSPURL:  env("EQUIP_MEDIAMTX_RTSP_URL", "rtsp://127.0.0.1:8554/live"),
 		MediamtxWHEPPort: whepPort,
 		MediamtxWHEPURL:  fmt.Sprintf("http://127.0.0.1:%d/live/whep", whepPort),
