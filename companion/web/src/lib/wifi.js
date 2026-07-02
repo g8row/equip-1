@@ -42,11 +42,21 @@ export async function joinDeviceAp() {
   if (!isNative()) {
     throw new Error("WiFi join is only available in the mobile app");
   }
-  const { CapacitorWifi } = await import("@capgo/capacitor-wifi");
-  await CapacitorWifi.connect({
+  const { CapacitorWifi, NetworkSecurityType } = await import("@capgo/capacitor-wifi");
+  // Use addNetwork (a persistent, *saved* network via WifiNetworkSuggestion),
+  // NOT connect() (WifiNetworkSpecifier). A specifier network is "local-only":
+  // no INTERNET capability, hidden from the status bar, never saved — and,
+  // critically, Chromium's WebRTC refuses to use it, so WHEP gathers zero ICE
+  // candidates and the live video stays black (confirmed live on-device). A
+  // saved network shows the WiFi icon, persists, installs a normal on-link route
+  // to 192.168.0.0/24 (so AP_GATEWAY stays reachable without the old
+  // bindProcessToNetwork hack), and is enumerable by WebRTC. The device AP is
+  // WPA3-SAE. addNetwork resolves once the OS add-network dialog is accepted;
+  // the actual association takes a moment, so callers poll AP_GATEWAY.
+  await CapacitorWifi.addNetwork({
     ssid: AP_SSID,
     password: AP_PASSPHRASE,
-    autoRouteTraffic: true, // route this app's traffic over the AP → reach AP_GATEWAY
+    securityType: NetworkSecurityType?.SAE ?? 4, // WPA3 Personal (SAE)
   });
 }
 
@@ -59,6 +69,22 @@ export async function leaveDeviceAp() {
     await CapacitorWifi.disconnect();
   } catch {
     // Already disconnected, or the OS dropped it — nothing to do.
+  }
+}
+
+// phoneWifiIp returns the phone's own IPv4 on the current WiFi (e.g.
+// "192.168.0.2"), or null. LAN auto-discovery needs this: on native the app is
+// served from https://localhost, so window.location.hostname yields no usable
+// subnet and discovery would only scan hardcoded guess ranges. Seeding it with
+// the phone's real /24 makes discovery scan the network it's actually on.
+export async function phoneWifiIp() {
+  if (!isNative()) return null;
+  try {
+    const { CapacitorWifi } = await import("@capgo/capacitor-wifi");
+    const { ipAddress } = await CapacitorWifi.getIpAddress();
+    return /^\d+\.\d+\.\d+\.\d+$/.test(ipAddress || "") ? ipAddress : null;
+  } catch {
+    return null;
   }
 }
 

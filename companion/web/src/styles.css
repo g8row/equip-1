@@ -777,3 +777,44 @@ h2.display {
   flex: 1;
   min-width: 160px;
 }
+
+/* --- Confirmation modal (ConfirmDialog) --------------------------------- */
+/* In-app replacement for window.confirm (native confirm is unbranded on
+   Capacitor). Sits above the header (z 20) and dock (z 30). */
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: max(var(--sp-4), env(safe-area-inset-top))
+    var(--sp-4)
+    max(var(--sp-4), env(safe-area-inset-bottom));
+  background: rgba(0, 0, 0, 0.65);
+}
+.modal {
+  width: 100%;
+  max-width: 22rem;
+  background: var(--surface-2);
+  border: 1px solid var(--line-strong);
+  border-radius: var(--radius);
+  padding: var(--sp-5);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.6);
+}
+.modal__title {
+  margin: 0 0 var(--sp-2);
+  font-size: 1rem;
+  color: var(--text);
+}
+.modal__msg {
+  margin: 0 0 var(--sp-5);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  color: var(--text-dim);
+}
+.modal__actions {
+  display: flex;
+  gap: var(--sp-2);
+  justify-content: flex-end;
+}
