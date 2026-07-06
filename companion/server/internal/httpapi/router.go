@@ -429,19 +429,38 @@ func (s *Server) handleSystemPower(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, sysinfo.Power())
 }
 
-// handleSystemRestart restarts companion-net (BLE/WiFi daemon) and mediamtx
-// via systemd — a remote fix for "BLE stopped advertising" or "stream is
-// wedged" without needing SSH. Deliberately does NOT restart companion-api
-// itself: this handler is running inside that process, and self-restarting
-// mid-request is a needless race to get right when force-quitting the app
-// already gives the user an equivalent "start over" for the API/UI side.
+// handleSystemRestart restarts companion-net (BLE/WiFi daemon) via systemd
+// and mediamtx in-process — a remote fix for "BLE stopped advertising" or
+// "stream is wedged" without needing SSH.
+//
+// There is no mediamtx.service (companion-api spawns and supervises mediamtx
+// itself as a child, via s.mediamtx — see CLAUDE.md's note against a
+// standalone unit); `systemctl restart … mediamtx` therefore always failed
+// with "Unit mediamtx.service not found", taking companion-net's restart
+// down with it since they were one systemctl invocation. Restarting mediamtx
+// means cycling that child directly.
+//
+// This deliberately still does NOT restart companion-api itself to get that
+// respawn: this handler runs inside that process, so systemd would SIGTERM
+// it mid-request (KillMode=control-group takes the exec'd systemctl child
+// down with it too) before the response below could ever be written — a
+// worse failure mode than the bug this is fixing. Force-quitting the app
+// remains the equivalent "start over" for the API/UI side.
 func (s *Server) handleSystemRestart(w http.ResponseWriter, r *http.Request) {
-	cmd := exec.Command("systemctl", "restart", "companion-net", "mediamtx")
+	cmd := exec.Command("systemctl", "restart", "companion-net")
 	if err := cmd.Run(); err != nil {
-		slog.Error("system-restart-failed", "error", err)
+		slog.Error("system-restart-failed", "service", "companion-net", "error", err)
 		writeError(w, http.StatusInternalServerError, "Restart failed: "+err.Error())
 		return
 	}
+
+	s.mediamtx.Stop()
+	if !s.mediamtx.Start() {
+		slog.Error("system-restart-failed", "service", "mediamtx")
+		writeError(w, http.StatusInternalServerError, "Restart failed: mediamtx did not come back up")
+		return
+	}
+
 	slog.Info("system-restart", "services", "companion-net,mediamtx")
 	writeJSON(w, http.StatusOK, map[string]any{"restarted": []string{"companion-net", "mediamtx"}})
 }
