@@ -822,6 +822,19 @@ h2.display {
   flex: none;
 }
 
+/* T4.11 native "Get": inline progress bar + Cancel that replaces the button
+   mid-download, and the failed-state label after it. Fixed narrow width so
+   it doesn't reflow the whole files-list row while transferring. */
+.download-progress {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+.download-progress__bar {
+  width: 64px;
+  flex: none;
+}
+
 /* .btn--sm's own padding lands around ~28px tall — fine for a mouse, too
    small a target for a touchscreen (WCAG 2.5.5 wants 44x44 CSS px). Scoped to
    the Files row actions (Share/Get/Del) rather than every .btn--sm in the

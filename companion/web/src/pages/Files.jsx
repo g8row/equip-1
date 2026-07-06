@@ -3,9 +3,11 @@ import { useServer } from "../context/ServerContext";
 import { deleteFile, getFileDownloadUrl } from "../api";
 import { formatBytes, formatDate } from "../lib/format";
 import { canShareNative, shareFile } from "../lib/share";
+import { isNative } from "../lib/native";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import Thumbnail from "../components/Thumbnail";
+import DownloadButton from "../components/DownloadButton";
 
 export default function Files() {
   // `refresh()` in ServerContext now only polls status (files were pulled out
@@ -133,15 +135,28 @@ export default function Files() {
                       {sharing === file.name ? "…" : "Share"}
                     </Button>
                   )}
-                  <a
-                    className="btn btn--sm"
-                    href={getFileDownloadUrl(apiBase, file.name)}
-                    target="_blank"
-                    rel="noreferrer"
-                    download={file.name}
-                  >
-                    Get
-                  </a>
+                  {isNative() ? (
+                    // Native: the WebView has no DownloadListener, so a plain
+                    // `<a download>` is typically swallowed silently for
+                    // anything past a trivial size (T4.11) — stream to disk
+                    // via @capacitor/filesystem with progress + cancel
+                    // instead. Web keeps the browser's own download manager.
+                    <DownloadButton
+                      url={getFileDownloadUrl(apiBase, file.name)}
+                      name={file.name}
+                      sizeBytes={file.size_bytes}
+                    />
+                  ) : (
+                    <a
+                      className="btn btn--sm"
+                      href={getFileDownloadUrl(apiBase, file.name)}
+                      target="_blank"
+                      rel="noreferrer"
+                      download={file.name}
+                    >
+                      Get
+                    </a>
+                  )}
                   <Button
                     size="sm"
                     variant="danger"
