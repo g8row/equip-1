@@ -302,7 +302,7 @@ export default function Connect() {
       return;
     }
     try {
-      await joinDeviceAp();
+      await joinDeviceAp(bleStatus?.ap_pass);
     } catch (err) {
       setBleError(
         `Couldn't join the ${AP_SSID} hotspot: ${err.message || String(err)}. ` +
@@ -1077,7 +1077,7 @@ export default function Connect() {
               </div>
               <div className="kv">
                 <span className="kv__k">password</span>
-                <span className="kv__v data">equip1device</span>
+                <span className="kv__v data">{bleStatus?.ap_pass || "—"}</span>
               </div>
             </div>
             <p className="dim" style={{ margin: 0, fontSize: "0.8rem" }}>

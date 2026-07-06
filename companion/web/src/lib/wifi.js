@@ -22,10 +22,14 @@ export function pskError(psk) {
   return null;
 }
 
-// Must match the device side: internal/ble/bluez.go `apPassphrase` and the
-// SSID the device advertises (its BLE name, "equip-1").
+// The SSID the device advertises for its own hotspot (its BLE name,
+// "equip-1"; see internal/ble/bluez.go).
 export const AP_SSID = "equip-1";
-export const AP_PASSPHRASE = "equip1device";
+// The AP passphrase is NOT hardcoded here — it comes from the device over
+// BLE (the `ap_pass` field on the status characteristic; single source of
+// truth is internal/network/connman.go `APPassphrase`, surfaced onto the
+// status JSON by internal/ble/api.go). Callers must pass it into
+// joinDeviceAp().
 // ConnMan brings the tether bridge up as 192.168.0.1/24 (its built-in
 // default), so the device API lives here once the phone is on the AP.
 export const AP_GATEWAY = "http://192.168.0.1:8000";
@@ -37,15 +41,20 @@ export const AP_GATEWAY = "http://192.168.0.1:8000";
 // namespace (safe, not thenable) and only await real method results below.
 
 // joinDeviceAp connects the phone to the device hotspot and binds app traffic
-// to it. Throws if the user declines the system dialog or the join fails.
-export async function joinDeviceAp() {
+// to it. `passphrase` must come from the device's status characteristic
+// (`ap_pass`), read over BLE before this is called. Throws if the user
+// declines the system dialog or the join fails.
+export async function joinDeviceAp(passphrase) {
   if (!isNative()) {
     throw new Error("WiFi join is only available in the mobile app");
+  }
+  if (!passphrase) {
+    throw new Error("Missing AP passphrase — read the device status over BLE first");
   }
   const { CapacitorWifi } = await import("@capgo/capacitor-wifi");
   await CapacitorWifi.connect({
     ssid: AP_SSID,
-    password: AP_PASSPHRASE,
+    password: passphrase,
     autoRouteTraffic: true, // route this app's traffic over the AP → reach AP_GATEWAY
   });
 }

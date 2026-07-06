@@ -52,6 +52,9 @@ func (c *APIClient) StatusPayload(ctx context.Context) []byte {
 		"ap":   false,
 		"bat":  power["battery"],
 		"chg":  power["charging"],
+		// ap_pass: the device's own hotspot passphrase (network.APPassphrase),
+		// so the app reads it here instead of hardcoding a copy — see T4.7.
+		"ap_pass": apPassphrase,
 	}
 	data, err := json.Marshal(payload)
 	if err != nil {

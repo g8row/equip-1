@@ -45,13 +45,10 @@ const (
 	servicePath dbus.ObjectPath = "/com/equip1/companion/service0"
 	adPath      dbus.ObjectPath = "/com/equip1/companion/advertisement0"
 
-	// apPassphrase secures the device's own WiFi hotspot (the AP-handoff
-	// fallback when the phone can't reach the device over BLE/LAN). ConnMan
-	// refuses to enable tethering with an empty passphrase (it silently stays
-	// off — Tethering=False, wlan0 never leaves managed mode), so this must be
-	// a valid WPA2 key (8-63 chars). It is shown to the user verbatim on the
-	// app's provisioning screen — keep it in sync with web/src/pages/Connect.jsx.
-	apPassphrase = "equip1device"
+	// apPassphrase aliases the single source of truth in internal/network so
+	// callers in this package don't need an extra import. See
+	// network.APPassphrase's doc comment.
+	apPassphrase = network.APPassphrase
 )
 
 // Provisioner is satisfied by provisioning.Manager; kept as an interface to
@@ -148,9 +145,13 @@ func NewServer(opts Options) (*Server, error) {
 func (s *Server) buildObjects() {
 	service := &gattService{path: servicePath}
 	s.status = newCharacteristic(statusUUID, servicePath, "status", []string{"read", "notify"})
-	wifiCreds := newCharacteristic(wifiCredsUUID, servicePath, "wifi_creds", []string{"write", "encrypt-write"})
-	apControl := newCharacteristic(apControlUUID, servicePath, "ap_control", []string{"write"})
-	recordControl := newCharacteristic(recordControlUUID, servicePath, "record_control", []string{"write"})
+	// encrypt-write only, deliberately without plain "write": BlueZ ORs a
+	// characteristic's permission flags together, so keeping "write" alongside
+	// "encrypt-write" would let an unencrypted write request satisfy either
+	// permission and nullify the encryption requirement.
+	wifiCreds := newCharacteristic(wifiCredsUUID, servicePath, "wifi_creds", []string{"encrypt-write"})
+	apControl := newCharacteristic(apControlUUID, servicePath, "ap_control", []string{"encrypt-write"})
+	recordControl := newCharacteristic(recordControlUUID, servicePath, "record_control", []string{"encrypt-write"})
 	s.netres = newCharacteristic(networkResultUUID, servicePath, "network_result", []string{"read", "notify"})
 	wifiScan := newCharacteristic(wifiScanUUID, servicePath, "wifi_scan", []string{"read"})
 
@@ -323,6 +324,13 @@ func (s *Server) registerWithAdapter(adapterPath dbus.ObjectPath) error {
 	if err := s.powerAdapter(adapterPath); err != nil {
 		return err
 	}
+
+	// Register (or re-register) the pairing agent before the GATT app: the
+	// wifi_creds/ap_control/record_control characteristics require an
+	// encrypted write, which triggers pairing on the first write from a phone
+	// that hasn't bonded yet. Without an agent registered, bluetoothd has
+	// nothing to drive Just-Works pairing headlessly and the write fails.
+	s.registerPairingAgent()
 
 	adapter := s.conn.Object(bluezName, adapterPath)
 	if err := adapter.Call(ifaceGattManager+".RegisterApplication", 0, appPath, map[string]dbus.Variant{}).Err; err != nil {

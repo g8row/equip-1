@@ -19,6 +19,16 @@ const (
 	ifaceAgent      = "net.connman.Agent"
 )
 
+// APPassphrase secures the device's own WiFi hotspot (the AP-handoff
+// fallback used when a phone can't reach the device over BLE/LAN). ConnMan
+// refuses to enable tethering with an empty passphrase (it silently stays
+// off — Tethering=False, wlan0 never leaves managed mode), so this must be a
+// valid WPA2 key (8-63 chars). It is exposed to the app over the BLE status
+// characteristic (internal/ble/api.go) rather than being duplicated as a
+// hardcoded literal on the client side — this is the single source of truth
+// for both internal/ble and internal/provisioning.
+const APPassphrase = "equip1device"
+
 // NetworkStatus holds the current state of ConnMan networking.
 type NetworkStatus struct {
 	State    string // "idle", "association", "configuration", "ready", "online", "disconnect"

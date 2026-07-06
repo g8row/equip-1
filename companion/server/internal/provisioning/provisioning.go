@@ -27,7 +27,7 @@ func NewManager(net *network.Manager, cfg Config) *Manager {
 		cfg.APSSID = "equip-1"
 	}
 	if cfg.APPassphrase == "" {
-		cfg.APPassphrase = "equip1device" // WPA2 requires ≥8 chars
+		cfg.APPassphrase = network.APPassphrase
 	}
 	return &Manager{
 		net:    net,
