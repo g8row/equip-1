@@ -52,6 +52,18 @@ func main() {
 		APSSID: name,
 	})
 
+	// SD-card provisioning fallback (T0.7): apply /boot/provision.json (path
+	// overridable via EQUIP_BOOT_PROVISION_PATH) if a laptop dropped one on
+	// the boot partition before first boot. Runs once, in the background —
+	// it does its own retries/timeouts and must not delay BLE/AP startup.
+	// No-op (and unlogged) if the file isn't present, which is also what
+	// happens if the boot partition isn't mounted at that path at all.
+	go func() {
+		if err := provisioning.ApplyBootProvisionFile(ctx, provMgr, provisioning.BootProvisionPath()); err != nil {
+			slog.Warn("companion-net-boot-provision-failed", "error", err)
+		}
+	}()
+
 	go provMgr.Run(ctx) // AP fallback runs no matter what happens to BLE
 
 	server, err := ble.NewServer(ble.Options{
