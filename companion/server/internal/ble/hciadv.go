@@ -1,12 +1,21 @@
 package ble
 
 import (
+	"context"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 )
+
+// hciCmdTimeout bounds every hcitool invocation so a wedged HCI controller
+// cannot stall the caller — notifyLoop calls into Start synchronously every
+// 60s to refresh advertising, and a hung hcitool would otherwise block that
+// forever.
+const hciCmdTimeout = 3 * time.Second
 
 // legacyAdvertiser sets up LE advertising via raw HCI commands (hcitool).
 //
@@ -72,28 +81,34 @@ func (a *legacyAdvertiser) Start(name, svcUUID string) error {
 
 	// Disable advertising before reconfiguring (status 0x0C = Command Disallowed
 	// if parameters are changed while advertising is active).
-	_ = a.hciCmd("0x08", "0x000A", "00")
+	_, _ = a.hciCmd("0x08", "0x000A", "00")
 
-	if err := a.hciCmd("0x08", "0x0006",
+	paramsStatus, err := a.hciCmd("0x08", "0x0006",
 		// LE_Set_Advertising_Parameters:
 		// interval min/max 160 (100ms), ADV_IND, own addr public,
 		// peer addr type public, peer addr 00:00:00:00:00:00,
 		// channel map all (37+38+39), filter policy none
 		"A0", "00", "A0", "00", "00",
 		"00", "00", "00", "00", "00", "00", "00", "00", "07", "00",
-	); err != nil {
+	)
+	// Logged unconditionally (success or failure): this status is the field
+	// signature of the AIC8800D80 defect — 0x0C (Command Disallowed) means
+	// something else (BlueZ's extended-adv path, or a leftover advertiser
+	// from a previous run) is still driving the radio.
+	slog.Info("ble-legacy-adv-params-status", "device", a.hciDev, "status", fmt.Sprintf("0x%02X", paramsStatus))
+	if err != nil {
 		return fmt.Errorf("set adv params: %w", err)
 	}
 
-	if err := a.hciCmd("0x08", "0x0008", buildAdvPayload(advData)...); err != nil {
+	if _, err := a.hciCmd("0x08", "0x0008", buildAdvPayload(advData)...); err != nil {
 		return fmt.Errorf("set adv data: %w", err)
 	}
 
-	if err := a.hciCmd("0x08", "0x0009", buildAdvPayload(scanRspData)...); err != nil {
+	if _, err := a.hciCmd("0x08", "0x0009", buildAdvPayload(scanRspData)...); err != nil {
 		return fmt.Errorf("set scan rsp: %w", err)
 	}
 
-	if err := a.hciCmd("0x08", "0x000A", "01"); err != nil {
+	if _, err := a.hciCmd("0x08", "0x000A", "01"); err != nil {
 		return fmt.Errorf("enable adv: %w", err)
 	}
 
@@ -103,31 +118,60 @@ func (a *legacyAdvertiser) Start(name, svcUUID string) error {
 
 // Stop disables LE advertising.
 func (a *legacyAdvertiser) Stop() {
-	_ = a.hciCmd("0x08", "0x000A", "00")
+	_, _ = a.hciCmd("0x08", "0x000A", "00")
 }
 
-// hciCmd runs: hcitool -i <dev> cmd <ogf> <ocf> [params...]
-func (a *legacyAdvertiser) hciCmd(ogf, ocf string, params ...string) error {
+// hciCmd runs `hcitool -i <dev> cmd <ogf> <ocf> [params...]`, bounded by
+// hciCmdTimeout, and returns the parsed Command Complete status byte
+// (0x00 = success).
+//
+// hcitool's output for a Command Complete event looks like:
+//
+//	> HCI Event: 0x0e plen 4
+//	01 06 20 00
+//
+// The four bytes on the line following the "0x0e" event header are
+// num_hci_command_packets, opcode-lo, opcode-hi, status — the LAST byte is
+// the status this parses. (The previous parser looked for a line starting
+// with "05", which hcitool never emits for these commands — it never
+// matched, so a nonzero status such as 0x0C Command Disallowed was silently
+// swallowed as success.)
+func (a *legacyAdvertiser) hciCmd(ogf, ocf string, params ...string) (byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), hciCmdTimeout)
+	defer cancel()
+
 	args := append([]string{"-i", a.hciDev, "cmd", ogf, ocf}, params...)
-	out, err := exec.Command("hcitool", args...).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "hcitool", args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("hcitool %s %s: %v (%s)", ogf, ocf, err, strings.TrimSpace(string(out)))
+		return 0, fmt.Errorf("hcitool %s %s: %v (%s)", ogf, ocf, err, strings.TrimSpace(string(out)))
 	}
-	// Check for error status in response: "> HCI Event: ... XX" where XX != 00
-	outStr := string(out)
-	if strings.Contains(outStr, "> HCI Event:") {
-		lines := strings.Split(outStr, "\n")
-		for _, l := range lines {
-			if strings.HasPrefix(strings.TrimSpace(l), "05") {
-				// Response line: "05 XX YY SS" — SS is status at index 3
-				fields := strings.Fields(strings.TrimSpace(l))
-				if len(fields) >= 4 && fields[3] != "00" {
-					return fmt.Errorf("hcitool %s %s: status 0x%s", ogf, ocf, fields[3])
-				}
-			}
+
+	lines := strings.Split(string(out), "\n")
+	for i, l := range lines {
+		if !strings.Contains(l, "HCI Event: 0x0e") {
+			continue
 		}
+		if i+1 >= len(lines) {
+			break
+		}
+		fields := strings.Fields(strings.TrimSpace(lines[i+1]))
+		if len(fields) == 0 {
+			break
+		}
+		status, perr := strconv.ParseUint(fields[len(fields)-1], 16, 8)
+		if perr != nil {
+			break
+		}
+		if status != 0 {
+			return byte(status), fmt.Errorf("hcitool %s %s: status 0x%02X", ogf, ocf, status)
+		}
+		return byte(status), nil
 	}
-	return nil
+	// No Command Complete event found in the output (e.g. hcitool emitted a
+	// Command Status event instead) — nothing to report as an error, but log
+	// for diagnostics since we can't confirm success either.
+	slog.Debug("hcitool-no-command-complete-event", "ogf", ogf, "ocf", ocf, "output", strings.TrimSpace(string(out)))
+	return 0, nil
 }
 
 // buildAdvPayload returns the 32-byte HCI payload for LE_Set_Advertising_Data

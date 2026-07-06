@@ -19,6 +19,11 @@ ExecStart=/usr/bin/companion-net
 Restart=always
 RestartSec=5
 Environment=EQUIP_API_BASE=http://127.0.0.1:8000
+# Single-path BLE advertising (legacy HCI only, no BlueZ RegisterAdvertisement)
+# — the AIC8800D80's broken extended-adv support otherwise races the legacy
+# advertiser and leaves LE_Set_Advertising_Parameters failing 0x0C. Set to 0
+# to restore the old dual-path behavior.
+Environment=EQUIP_BLE_LEGACY_ADV=1
 StandardOutput=journal
 StandardError=journal
 

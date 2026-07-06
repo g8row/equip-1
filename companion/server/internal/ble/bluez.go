@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sort"
 	"strings"
 	"sync"
@@ -328,36 +329,55 @@ func (s *Server) registerWithAdapter(adapterPath dbus.ObjectPath) error {
 		return fmt.Errorf("register gatt application: %w", err)
 	}
 
-	// Try BlueZ-managed advertisement first; if it fails (e.g. AIC8800 does not
-	// support extended LE advertising commands), fall back to raw HCI legacy
-	// advertising via hcitool.  The GATT service still handles incoming connections
-	// regardless of which advertising path is used.
 	hciDev := hciDevFromAdapter(string(adapterPath)) // e.g. "/org/bluez/hci0" → "hci0"
 	hciAdv := newLegacyAdvertiser(hciDev)
 	s.adapterMu.Lock()
 	s.hciAdv = hciAdv
 	s.adapterMu.Unlock()
 
-	regErr := adapter.Call(ifaceLEAdvertisingManager+".RegisterAdvertisement", 0, adPath, map[string]dbus.Variant{}).Err
-	if regErr != nil {
-		slog.Warn("ble-bluez-adv-failed-using-legacy-hci", "error", regErr)
-	}
-	// Always also start legacy HCI advertising so the chip actually transmits —
-	// on AIC8800D80 BlueZ's extended advertising path sets ActiveInstances=1
-	// but never transmits; legacy HCI commands are confirmed to work.
-	if advErr := hciAdv.Start(s.name, serviceUUID); advErr != nil {
-		slog.Warn("ble-legacy-adv-start-failed", "error", advErr)
-	}
-
-	if regErr != nil && hciAdv == nil {
-		_ = adapter.Call(ifaceGattManager+".UnregisterApplication", 0, appPath).Err
-		return fmt.Errorf("register advertisement: %w", regErr)
+	if legacyAdvOnly() {
+		// Single advertising path (EQUIP_BLE_LEGACY_ADV, default on): BlueZ's
+		// RegisterAdvertisement drives the AIC8800 down its broken extended-adv
+		// path, and racing it against the raw legacy HCI advertiser is what
+		// left LE_Set_Advertising_Parameters failing with 0x0C (Command
+		// Disallowed). Skip RegisterAdvertisement entirely — legacy HCI is the
+		// only advertiser.
+		if advErr := hciAdv.Start(s.name, serviceUUID); advErr != nil {
+			slog.Warn("ble-legacy-adv-start-failed", "error", advErr)
+		}
+	} else {
+		// Old dual-path behavior, kept for comparison/rollback via the env
+		// flag: try BlueZ-managed advertisement first, and always also start
+		// legacy HCI advertising since on AIC8800D80 BlueZ's extended
+		// advertising path sets ActiveInstances=1 but never transmits.
+		if regErr := adapter.Call(ifaceLEAdvertisingManager+".RegisterAdvertisement", 0, adPath, map[string]dbus.Variant{}).Err; regErr != nil {
+			slog.Warn("ble-bluez-adv-failed-using-legacy-hci", "error", regErr)
+		}
+		if advErr := hciAdv.Start(s.name, serviceUUID); advErr != nil {
+			slog.Warn("ble-legacy-adv-start-failed", "error", advErr)
+		}
 	}
 
 	s.adapterMu.Lock()
 	s.registered = true
 	s.adapterMu.Unlock()
 	return nil
+}
+
+// legacyAdvOnly reports whether legacy-only HCI advertising should be used,
+// skipping BlueZ's RegisterAdvertisement entirely. Defaults to true (also set
+// explicitly by the companion-net systemd unit): on the AIC8800D80, BlueZ's
+// extended-adv RegisterAdvertisement and the raw legacy HCI advertiser both
+// drive the radio and race, leaving LE_Set_Advertising_Parameters to fail
+// with 0x0C (Command Disallowed). Set EQUIP_BLE_LEGACY_ADV=0 to restore the
+// old dual-path behavior.
+func legacyAdvOnly() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("EQUIP_BLE_LEGACY_ADV"))) {
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return true
+	}
 }
 
 // watchAdapterEvents runs for the lifetime of the server, reacting to the BT
