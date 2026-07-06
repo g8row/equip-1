@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"equip1/companion/server/internal/ble"
 	"equip1/companion/server/internal/config"
@@ -28,16 +29,30 @@ func main() {
 	}
 
 	// Network manager is shared between BLE server and provisioning state machine.
-	netMgr, err := network.NewManager()
-	if err != nil {
-		slog.Error("companion-net-network-failed", "error", err)
-		os.Exit(1)
+	// D-Bus itself may not be ready yet even though systemd orders us After=dbus.service
+	// (ordering doesn't guarantee the bus accepts connections at exec time) — retry
+	// before giving up for good.
+	var netMgr *network.Manager
+	var err error
+	for attempt := 1; ; attempt++ {
+		netMgr, err = network.NewManager()
+		if err == nil {
+			break
+		}
+		if attempt >= 5 {
+			slog.Error("companion-net-network-failed", "error", err, "attempts", attempt)
+			os.Exit(1)
+		}
+		slog.Warn("companion-net-network-retrying", "error", err, "attempt", attempt)
+		time.Sleep(2 * time.Second)
 	}
 	defer netMgr.Close()
 
 	provMgr := provisioning.NewManager(netMgr, provisioning.Config{
 		APSSID: name,
 	})
+
+	go provMgr.Run(ctx) // AP fallback runs no matter what happens to BLE
 
 	server, err := ble.NewServer(ble.Options{
 		APIBase: cfg.APIBase,
@@ -46,17 +61,31 @@ func main() {
 		NetCtl:  netMgr,
 	})
 	if err != nil {
+		// Construction failure (D-Bus object export) — retryable, not fatal.
 		slog.Error("companion-net-init-failed", "error", err)
-		os.Exit(1)
-	}
-	defer server.Stop()
-
-	if err := server.Start(ctx); err != nil {
-		slog.Error("companion-net-start-failed", "error", err)
-		os.Exit(1)
 	}
 
-	go provMgr.Run(ctx)
+	if server != nil {
+		defer server.Stop()
+		go func() {
+			backoff := 2 * time.Second
+			for {
+				err := server.Start(ctx)
+				if err == nil {
+					return // started; adapter-loss recovery is T0.2's job
+				}
+				slog.Warn("ble-start-failed-retrying", "error", err, "backoff", backoff)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				if backoff < 30*time.Second {
+					backoff *= 2
+				}
+			}
+		}()
+	}
 
 	<-ctx.Done()
 	slog.Info("companion-net-shutdown")
