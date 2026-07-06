@@ -30,3 +30,7 @@ fabrication-toolkit-options.json
 
 *.stl
 *.ttf
+
+# deploy.sh rebuilds these arm64 binaries fresh on every deploy; don't track
+# stale prebuilt copies.
+companion/deploy/bin/
