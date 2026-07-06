@@ -30,6 +30,13 @@ type SeamlessDvHub struct {
 	rtspURL  string
 	hub      *Hub
 
+	// onRecordFailure, when set, is invoked (outside s.mu) with a stop reason
+	// whenever the pump closes the record file due to an error rather than a
+	// clean StopRecording call — e.g. "write_error". Wired to the recorder
+	// after construction (see cmd/companion-api/main.go), mirroring
+	// PreviewPush.SetRecordingCheck.
+	onRecordFailure func(reason string)
+
 	mu sync.Mutex
 	// gen is bumped every time a pipeline is (re)started. It lets goroutines
 	// spawned for an old pipeline (pumpLoop) recognize they've been
@@ -54,6 +61,14 @@ func NewSeamlessDvHub(mediamtx *MediamtxManager, rtspURL string) *SeamlessDvHub 
 		rtspURL:  rtspURL,
 		hub:      NewHub("seamless"),
 	}
+}
+
+// SetRecordFailureCallback registers cb to be invoked when a record-file
+// write fails mid-capture (see onRecordFailure).
+func (s *SeamlessDvHub) SetRecordFailureCallback(cb func(reason string)) {
+	s.mu.Lock()
+	s.onRecordFailure = cb
+	s.mu.Unlock()
 }
 
 // EnsureRunning starts the capture pipeline if it is not already alive. It is
@@ -217,6 +232,30 @@ func (s *SeamlessDvHub) StopRecording() {
 	}
 }
 
+// stopRecordingWithReason closes the record file the way StopRecording does,
+// but because it's invoked from the pump on a write error (not a caller
+// asking to stop cleanly) it also reports reason to onRecordFailure so the
+// recorder's state machine can leave the ".part" file in place and surface
+// why. Capture itself (dvgrab/ffmpeg, the stream) is left running — only the
+// recording tap stops.
+func (s *SeamlessDvHub) stopRecordingWithReason(reason string) {
+	s.mu.Lock()
+	handle := s.recordFile
+	path := s.recordPath
+	s.recordFile = nil
+	s.recordPath = ""
+	cb := s.onRecordFailure
+	s.mu.Unlock()
+	if handle != nil {
+		handle.Sync()
+		handle.Close()
+		slog.Error("seamless-record-stop-error", "file", path, "reason", reason)
+	}
+	if cb != nil {
+		cb(reason)
+	}
+}
+
 // Subscribe registers an MJPEG subscriber (ensuring capture is running first).
 func (s *SeamlessDvHub) Subscribe() (uint64, <-chan []byte, error) {
 	if err := s.EnsureRunning(); err != nil {
@@ -302,12 +341,27 @@ func (s *SeamlessDvHub) stopIfGen(gen uint64) {
 	s.stopLocked(gen)
 }
 
+// recordSyncInterval is how many record-file bytes accumulate between
+// explicit fsyncs (~5s of DV at ~3.5MB/s) — cheap insurance against losing
+// more than a few seconds of footage to a page-cache flush that never
+// happens (power pull, kernel panic), without fsyncing on every chunk.
+const recordSyncInterval = 16 * 1024 * 1024
+
+// recordWriteErrorReason must match recorder.ReasonWriteError. package stream
+// cannot import package recorder (recorder already imports stream), so the
+// string is intentionally duplicated rather than shared — keep both in sync.
+const recordWriteErrorReason = "write_error"
+
 // pumpLoop reads DV chunks from dvgrab and writes them to ffmpeg stdin and (when
-// recording) the open record file. On any read/write failure it tears the hub
-// down, mirroring _pump_loop calling self.stop() — but only if gen is still
-// current (see stopIfGen).
+// recording) the open record file. A failed write to ffmpeg tears the whole
+// pipeline down (mirrors _pump_loop calling self.stop()) — but only if gen is
+// still current (see stopIfGen). A failed write to the record file is less
+// severe: only the recording tap stops (via stopRecordingWithReason), since
+// the capture pipeline feeding the live stream is still healthy.
 func (s *SeamlessDvHub) pumpLoop(gen uint64, dvOut io.Reader, ffIn io.Writer) {
 	buf := make([]byte, mjpegChunkSize)
+	var syncFile *os.File
+	var sinceSync int
 	for {
 		s.mu.Lock()
 		current := s.gen == gen && s.running
@@ -315,6 +369,10 @@ func (s *SeamlessDvHub) pumpLoop(gen uint64, dvOut io.Reader, ffIn io.Writer) {
 		s.mu.Unlock()
 		if !current {
 			break
+		}
+		if recordFile != syncFile {
+			syncFile = recordFile
+			sinceSync = 0
 		}
 
 		n, err := dvOut.Read(buf)
@@ -325,7 +383,16 @@ func (s *SeamlessDvHub) pumpLoop(gen uint64, dvOut io.Reader, ffIn io.Writer) {
 			}
 			if recordFile != nil {
 				if _, ferr := recordFile.Write(buf[:n]); ferr != nil {
-					slog.Warn("seamless-pump-file-write-failed", "error", ferr, "gen", gen)
+					slog.Error("seamless-pump-file-write-failed", "error", ferr, "gen", gen)
+					s.stopRecordingWithReason(recordWriteErrorReason)
+				} else {
+					sinceSync += n
+					if sinceSync >= recordSyncInterval {
+						if serr := recordFile.Sync(); serr != nil {
+							slog.Warn("seamless-pump-file-sync-failed", "error", serr, "gen", gen)
+						}
+						sinceSync = 0
+					}
 				}
 			}
 		}

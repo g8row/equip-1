@@ -59,6 +59,11 @@ func run() int {
 	// Wire preview's recording-state predicate (mirrors main.py setting
 	// preview._recorder after construction).
 	preview.SetRecordingCheck(rec.IsRecording)
+	// Wire the seamless hub's write-error callback back into the recorder's
+	// state machine (T4.4): a failed record-file write stops just the
+	// recording tap, not the capture pipeline, so the hub can't drive this
+	// transition itself.
+	seamless.SetRecordFailureCallback(rec.RecordFailed)
 
 	srv := httpapi.New(httpapi.Deps{
 		Config:      cfg,
@@ -114,7 +119,7 @@ func run() int {
 	broadcaster.Stop()
 	preview.Stop()
 	directMjpeg.StopAll()
-	rec.Stop()
+	rec.StopWithReason(recorder.ReasonShutdown)
 	mediamtx.Stop()
 	slog.Warn("shutdown-complete")
 

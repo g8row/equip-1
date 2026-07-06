@@ -6,6 +6,7 @@ package httpapi
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"os"
@@ -228,16 +229,30 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) recorderPayload() map[string]any {
 	return map[string]any{
-		"mode":            s.recorder.Mode(),
-		"elapsed_seconds": s.recorder.ElapsedSeconds(),
-		"current_file":    nullableString(s.recorder.CurrentFile()),
+		"mode":             s.recorder.Mode(),
+		"elapsed_seconds":  s.recorder.ElapsedSeconds(),
+		"current_file":     nullableString(s.recorder.CurrentFile()),
+		"last_stop_reason": nullableString(s.recorder.LastStopReason()),
+		"last_stop_at":     nullableUnix(s.recorder.LastStopAt()),
 	}
+}
+
+// writeRecordActionError maps a recorder.Start/Toggle error to a status
+// code: a concurrent start in flight is a 409 (the caller should back off
+// and re-poll status, not treat it as a hard failure), everything else stays
+// the existing 503.
+func writeRecordActionError(w http.ResponseWriter, logMsg string, err error) {
+	if errors.Is(err, recorder.ErrAlreadyStarting) {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	slog.Warn(logMsg, "error", err)
+	writeError(w, http.StatusServiceUnavailable, err.Error())
 }
 
 func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 	if err := s.recorder.Toggle(); err != nil {
-		slog.Warn("record-toggle-failed", "error", err)
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeRecordActionError(w, "record-toggle-failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.recorderPayload())
@@ -245,8 +260,7 @@ func (s *Server) handleRecordToggle(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleRecordStart(w http.ResponseWriter, r *http.Request) {
 	if err := s.recorder.Start(); err != nil {
-		slog.Warn("record-start-failed", "error", err)
-		writeError(w, http.StatusServiceUnavailable, err.Error())
+		writeRecordActionError(w, "record-start-failed", err)
 		return
 	}
 	writeJSON(w, http.StatusOK, s.recorderPayload())
@@ -319,7 +333,7 @@ func (s *Server) resetStreamWorkersForModeChange(newMode string) {
 func (s *Server) handleFiles(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"capture_dir": s.files.Dir(),
-		"items":       s.files.List(100),
+		"items":       s.files.List(100, s.recorder.CurrentFile()),
 	})
 }
 
@@ -354,7 +368,7 @@ func (s *Server) handleThumbnail(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 	name := r.PathValue("name")
-	if err := s.files.Delete(name); err != nil {
+	if err := s.files.Delete(name, s.recorder.CurrentFile()); err != nil {
 		s.writeFileError(w, err)
 		return
 	}
@@ -368,6 +382,8 @@ func (s *Server) writeFileError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusBadRequest, e.Detail)
 	case *files.ErrNotFound:
 		writeError(w, http.StatusNotFound, e.Error())
+	case *files.ErrActiveRecording:
+		writeError(w, http.StatusConflict, e.Error())
 	default:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	}
@@ -444,4 +460,12 @@ func nullableInt(v int) any {
 		return nil
 	}
 	return v
+}
+
+// nullableUnix returns nil for a zero time.Time, else its Unix seconds.
+func nullableUnix(t time.Time) any {
+	if t.IsZero() {
+		return nil
+	}
+	return t.Unix()
 }

@@ -7,6 +7,7 @@
 package recorder
 
 import (
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -30,11 +31,33 @@ const (
 	minFreeBytesToStart = 200 * 1024 * 1024
 	// minFreeBytesCritical auto-stops an in-progress recording before the
 	// disk fills completely and capture processes start failing mid-write.
-	minFreeBytesCritical = 50 * 1024 * 1024
+	// 150MB (~40s of DV headroom) instead of 50MB: the watchdog only samples
+	// every storageWatchInterval, so the margin has to absorb a full
+	// interval's worth of writes plus however long Stop()'s Terminate calls
+	// take, not just the instant the check fires.
+	minFreeBytesCritical = 150 * 1024 * 1024
 	// storageWatchInterval is how often the background watchdog checks free
-	// space while a recording is active.
-	storageWatchInterval = 10 * time.Second
+	// space while a recording is active. 3s (down from 10s) so a fast-filling
+	// disk is caught with enough of minFreeBytesCritical's margin left to
+	// stop cleanly before capture processes start failing mid-write.
+	storageWatchInterval = 3 * time.Second
 )
+
+// Stop reasons, exposed via /api/status so the app can show *why* recording
+// isn't running instead of the user guessing.
+const (
+	ReasonUser        = "user"         // explicit stop via the API
+	ReasonDiskFull    = "disk_full"    // storageWatchLoop auto-stop
+	ReasonProcessDied = "process_died" // dvgrab/ffmpeg exited unexpectedly
+	ReasonWriteError  = "write_error"  // record-file write failed mid-capture
+	ReasonShutdown    = "shutdown"     // companion-api graceful shutdown
+)
+
+// ErrAlreadyStarting is returned by Start when another Start call is still in
+// flight (mode already flipped to "starting" but not yet "recording" or back
+// to "idle"). Distinguished from other Start errors so callers can map it to
+// HTTP 409 instead of 503.
+var ErrAlreadyStarting = errors.New("a recording is already starting")
 
 // RecorderState manages recording lifecycle and state.
 type RecorderState struct {
@@ -48,13 +71,16 @@ type RecorderState struct {
 	// stopAllDirectMjpeg releases any direct MJPEG streams owning the bus.
 	stopAllDirectMjpeg func()
 
-	mu          sync.Mutex
-	mode        string // "idle" | "recording"
-	startTime   time.Time
-	dvgrab      *proc.Proc
-	mux         *proc.Proc
-	muxStdout   *os.File
-	currentFile string
+	mu             sync.Mutex
+	mode           string // "idle" | "starting" | "recording"
+	startTime      time.Time
+	dvgrab         *proc.Proc
+	mux            *proc.Proc
+	muxStdout      *os.File
+	currentFile    string // the ".part" path actually being written, while recording
+	finalFile      string // currentFile's name after a clean stop renames it
+	lastStopReason string
+	lastStopAt     time.Time
 
 	// mjpegHub fans out the recording mux's mpjpeg output (ffmpeg-only, no-RTSP
 	// path). Subscribers are never wired in main.py; kept for parity.
@@ -117,7 +143,7 @@ func (r *RecorderState) storageWatchLoop() {
 		if free < minFreeBytesCritical {
 			slog.Error("record-storage-critical-auto-stop",
 				"free_bytes", free, "threshold_bytes", minFreeBytesCritical)
-			r.Stop()
+			r.stopWithReason(ReasonDiskFull)
 		}
 	}
 }
@@ -131,25 +157,45 @@ func (r *RecorderState) Toggle() error {
 	return r.Start()
 }
 
-// Start begins recording. Returns an error (mapped to HTTP 503) when
-// requirements are unmet or ffmpeg/dvgrab exits immediately.
-func (r *RecorderState) Start() error {
+// Start begins recording. Returns an error (mapped to HTTP 503, or
+// ErrAlreadyStarting mapped to 409) when requirements are unmet, a start is
+// already in flight, or ffmpeg/dvgrab exits immediately.
+func (r *RecorderState) Start() (err error) {
 	r.RefreshProcessState()
 
 	r.mu.Lock()
-	if r.mode == "recording" {
+	switch r.mode {
+	case "recording":
 		current := r.currentFile
 		r.mu.Unlock()
 		slog.Info("record-start-ignored", "mode", "recording", "current_file", current)
 		return nil
+	case "starting":
+		r.mu.Unlock()
+		return ErrAlreadyStarting
 	}
+	// Claim "starting" in the same critical section as the mode check above —
+	// otherwise two concurrent Start() calls can both observe "idle" and both
+	// spawn a competing dvgrab/ffmpeg pair. Any early return below must go
+	// through the deferred reset so a rejected/failed start doesn't strand
+	// the recorder in "starting" forever.
+	r.mode = "starting"
 	r.mu.Unlock()
+	defer func() {
+		if err != nil {
+			r.mu.Lock()
+			if r.mode == "starting" { // a completed spawn already moved past this
+				r.mode = "idle"
+			}
+			r.mu.Unlock()
+		}
+	}()
 
 	captureMode := r.captureMode.Get()
 	slog.Info("record-start", "capture_mode", captureMode)
 
 	// ---- Requirements check ----
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
+	if _, lookErr := exec.LookPath("ffmpeg"); lookErr != nil {
 		return fmt.Errorf("ffmpeg is not installed")
 	}
 	if captureMode == "dvgrab" {
@@ -157,31 +203,39 @@ func (r *RecorderState) Start() error {
 		if len(fwNodes) == 0 {
 			return fmt.Errorf("Camera not found — no /dev/fw* device present")
 		}
-		if _, err := exec.LookPath("dvgrab"); err != nil {
+		if _, lookErr := exec.LookPath("dvgrab"); lookErr != nil {
 			return fmt.Errorf("dvgrab is not installed")
 		}
 	}
 
-	if free, err := freeBytes(r.captureDir); err == nil && free < minFreeBytesToStart {
+	if free, ferr := freeBytes(r.captureDir); ferr == nil && free < minFreeBytesToStart {
 		return fmt.Errorf("Not enough free storage to start recording (%.0f MB free, need %.0f MB)",
 			float64(free)/1024/1024, float64(minFreeBytesToStart)/1024/1024)
 	}
 
 	selectedEncoder := encoders.SafeSelectedRTSPEncoder()
 
+	// Every capture writes to a ".part" file first; Stop only renames it away
+	// on a clean, user-initiated stop (see stopWithReason). Anything else —
+	// crash, disk-full auto-stop, write error, shutdown — leaves the ".part"
+	// name in place so files.List can flag it as a recovered/incomplete
+	// capture instead of presenting it as a normal, complete recording.
+	timestamp := time.Now().Format("20060102_150405")
+	finalPath := filepath.Join(r.captureDir, fmt.Sprintf("capture_%s.dv", timestamp))
+	outputPath := finalPath + ".part"
+
 	// dvgrab mode uses the always-on seamless hub for stream + recording tap.
 	if captureMode == "dvgrab" {
-		timestamp := time.Now().Format("20060102_150405")
-		outputPath := filepath.Join(r.captureDir, fmt.Sprintf("capture_%s.dv", timestamp))
 		slog.Info("record-start", "seamless-hub", true, "output", outputPath, "encoder", selectedEncoder)
 
-		if err := r.seamless.StartRecording(outputPath); err != nil {
+		if err = r.seamless.StartRecording(outputPath); err != nil {
 			return err
 		}
 		r.mu.Lock()
 		r.mode = "recording"
 		r.startTime = time.Now()
 		r.currentFile = outputPath
+		r.finalFile = finalPath
 		r.mu.Unlock()
 		slog.Info("record-start", "complete", true, "file", outputPath)
 		return nil
@@ -204,8 +258,6 @@ func (r *RecorderState) Start() error {
 	}
 	time.Sleep(300 * time.Millisecond) // give the bus a moment to release
 
-	timestamp := time.Now().Format("20060102_150405")
-	outputPath := filepath.Join(r.captureDir, fmt.Sprintf("capture_%s.dv", timestamp))
 	slog.Info("record-start-requested", "output", outputPath)
 
 	// Add RTSP output only when a WebRTC-compatible encoder is available.
@@ -213,9 +265,9 @@ func (r *RecorderState) Start() error {
 	var rtspOutputArgs []string
 	var mjpegLiveArgs []string
 	if enableRTSPOutput {
-		args, err := encoders.BuildRTSPVideoOutputArgs(r.rtspURL)
-		if err != nil {
-			return err
+		args, argErr := encoders.BuildRTSPVideoOutputArgs(r.rtspURL)
+		if argErr != nil {
+			return argErr
 		}
 		rtspOutputArgs = args
 	} else {
@@ -223,7 +275,7 @@ func (r *RecorderState) Start() error {
 	}
 	slog.Info("record-start-stream-path", "encoder", selectedEncoder, "rtsp_enabled", enableRTSPOutput)
 
-	if err := r.spawnMux(captureMode, outputPath, rtspOutputArgs, mjpegLiveArgs, enableRTSPOutput); err != nil {
+	if err = r.spawnMux(captureMode, outputPath, rtspOutputArgs, mjpegLiveArgs, enableRTSPOutput); err != nil {
 		return err
 	}
 
@@ -231,6 +283,7 @@ func (r *RecorderState) Start() error {
 	r.mode = "recording"
 	r.startTime = time.Now()
 	r.currentFile = outputPath
+	r.finalFile = finalPath
 	mux := r.mux
 	dvgrab := r.dvgrab
 	muxStdout := r.muxStdout
@@ -243,12 +296,12 @@ func (r *RecorderState) Start() error {
 	time.Sleep(200 * time.Millisecond)
 	if mux != nil && mux.Exited() {
 		rc := mux.ExitCode()
-		r.Stop()
+		r.stopWithReason(ReasonProcessDied)
 		return fmt.Errorf("ffmpeg mux exited immediately (rc=%d)", rc)
 	}
 	if captureMode == "dvgrab" && dvgrab != nil && dvgrab.Exited() {
 		rc := dvgrab.ExitCode()
-		r.Stop()
+		r.stopWithReason(ReasonProcessDied)
 		return fmt.Errorf("dvgrab exited immediately (rc=%d)", rc)
 	}
 
@@ -393,45 +446,79 @@ func (r *RecorderState) StopMjpegFanout() {
 	r.mjpegHub.CloseAll()
 }
 
-// Stop ends recording.
+// Stop ends recording as a user-initiated action.
 func (r *RecorderState) Stop() {
+	r.stopWithReason(ReasonUser)
+}
+
+// StopWithReason ends recording, tagging the transition with reason
+// (exported for cmd/companion-api's shutdown path; internal auto-stops use
+// the private stopWithReason directly).
+func (r *RecorderState) StopWithReason(reason string) {
+	r.stopWithReason(reason)
+}
+
+// RecordFailed is invoked by the seamless hub (dvgrab mode) when a
+// record-file write fails mid-capture. Unlike a normal stop the capture
+// pipeline itself (dvgrab/ffmpeg feeding the stream) is untouched — the hub
+// has already closed just the record-file tap — so this only needs to bring
+// the recorder's own state machine back to idle with the right reason.
+func (r *RecorderState) RecordFailed(reason string) {
+	r.stopWithReason(reason)
+}
+
+// stopWithReason ends recording and records why. Only a clean, user-
+// initiated stop finalizes the ".part" file to its real name (see Start's
+// comment on outputPath) — every other reason leaves the ".part" name in
+// place so files.List's recovered/incomplete check can flag it.
+func (r *RecorderState) stopWithReason(reason string) {
 	r.mu.Lock()
 	mode := r.mode
 	current := r.currentFile
+	final := r.finalFile
 	r.mu.Unlock()
-	slog.Info("record-stop-requested", "mode", mode, "file", current)
+	slog.Info("record-stop-requested", "mode", mode, "file", current, "reason", reason)
 
 	captureMode := r.captureMode.Get()
 
 	if captureMode == "dvgrab" {
 		r.seamless.StopRecording()
+	} else {
 		r.mu.Lock()
-		r.mode = "idle"
-		r.startTime = time.Time{}
+		mux := r.mux
+		dvgrab := r.dvgrab
+		r.mux = nil
+		r.dvgrab = nil
+		r.muxStdout = nil
 		r.mu.Unlock()
-		slog.Info("record-stop-complete")
-		return
+
+		r.StopMjpegFanout()
+
+		if mux != nil {
+			mux.Terminate(3 * time.Second)
+		}
+		if dvgrab != nil {
+			dvgrab.Terminate(3 * time.Second)
+		}
+	}
+
+	if reason == ReasonUser && current != "" && final != "" {
+		if err := os.Rename(current, final); err != nil {
+			slog.Error("record-finalize-rename-failed", "from", current, "to", final, "error", err)
+		} else {
+			slog.Info("record-finalize", "file", final)
+		}
 	}
 
 	r.mu.Lock()
 	r.mode = "idle"
 	r.startTime = time.Time{}
-	mux := r.mux
-	dvgrab := r.dvgrab
-	r.mux = nil
-	r.dvgrab = nil
-	r.muxStdout = nil
+	r.currentFile = ""
+	r.finalFile = ""
+	r.lastStopReason = reason
+	r.lastStopAt = time.Now()
 	r.mu.Unlock()
-
-	r.StopMjpegFanout()
-
-	if mux != nil {
-		mux.Terminate(3 * time.Second)
-	}
-	if dvgrab != nil {
-		dvgrab.Terminate(3 * time.Second)
-	}
-	slog.Info("record-stop-complete")
+	slog.Info("record-stop-complete", "reason", reason)
 }
 
 // RefreshProcessState detects dead capture processes and resets state. Mirrors
@@ -448,10 +535,7 @@ func (r *RecorderState) RefreshProcessState() {
 	if captureMode == "dvgrab" {
 		if !r.seamless.IsRunning() {
 			slog.Error("record-process-died", "detail", "seamless-hub not-running")
-			r.mu.Lock()
-			r.mode = "idle"
-			r.startTime = time.Time{}
-			r.mu.Unlock()
+			r.stopWithReason(ReasonProcessDied)
 		}
 		return
 	}
@@ -470,7 +554,7 @@ func (r *RecorderState) RefreshProcessState() {
 	}
 	if dead {
 		slog.Error("record-process-died")
-		r.Stop()
+		r.stopWithReason(ReasonProcessDied)
 	}
 }
 
@@ -481,18 +565,35 @@ func (r *RecorderState) IsRecording() bool {
 	return r.mode == "recording"
 }
 
-// Mode returns the current recorder mode ("idle" | "recording").
+// Mode returns the current recorder mode ("idle" | "starting" | "recording").
 func (r *RecorderState) Mode() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.mode
 }
 
-// CurrentFile returns the current recording file path (empty if idle).
+// CurrentFile returns the current recording file path (empty if idle). While
+// recording this is the in-progress ".part" path (see Start); it is cleared
+// on every stop, clean or not.
 func (r *RecorderState) CurrentFile() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.currentFile
+}
+
+// LastStopReason returns why capture last stopped
+// (Reason* constant; "" if it has never stopped this process's lifetime).
+func (r *RecorderState) LastStopReason() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastStopReason
+}
+
+// LastStopAt returns when capture last stopped (zero if never).
+func (r *RecorderState) LastStopAt() time.Time {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.lastStopAt
 }
 
 // ElapsedSeconds returns the recording duration in whole seconds.

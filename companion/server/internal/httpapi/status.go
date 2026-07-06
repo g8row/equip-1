@@ -80,13 +80,15 @@ func (s *Server) handleStatus(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"recorder": map[string]any{
-			"mode":            s.recorder.Mode(),
-			"elapsed_seconds": s.recorder.ElapsedSeconds(),
-			"current_file":    nullableString(s.recorder.CurrentFile()),
-			"capture_mode":    captureMode,
+			"mode":             s.recorder.Mode(),
+			"elapsed_seconds":  s.recorder.ElapsedSeconds(),
+			"current_file":     nullableString(s.recorder.CurrentFile()),
+			"capture_mode":     captureMode,
+			"last_stop_reason": nullableString(s.recorder.LastStopReason()),
+			"last_stop_at":     nullableUnix(s.recorder.LastStopAt()),
 		},
 		"storage": stats,
-		"files":   s.files.List(10),
+		"files":   s.files.List(10, s.recorder.CurrentFile()),
 		"network": s.networkStatus(),
 		"stream": map[string]any{
 			"available":          ffmpegOK && req["camera_present"].(bool),
