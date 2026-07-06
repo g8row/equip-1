@@ -82,7 +82,10 @@ export default function AppShell() {
             title={apiBase}
             style={{ textDecoration: "none" }}
           >
-            <StatusDot state={serverState} />
+            {/* The visible text is usually the host/IP, not a state word —
+                give the dot its own accessible name so the connection state
+                isn't sighted-only. */}
+            <StatusDot state={serverState} srLabel={serverLabel} />
             <span className="data dim">{host || serverLabel}</span>
           </Link>
         </div>

@@ -28,10 +28,15 @@ export default function Settings() {
     refreshCaptureMode,
     streamMode,
     setStreamMode,
-    setError,
     refresh,
     reachable,
   } = useServer();
+
+  // Local, transient action-error state (T4.9): this used to go through the
+  // context's connectivity `error`, which nothing on this page ever
+  // rendered anyway (it was Viewfinder's/Connect's to show) — these are
+  // fully local now instead of silently landing on a field nobody here reads.
+  const [actionError, setActionError] = useState("");
 
   const [network, setNetwork] = useState(null);
   const [networkAvailable, setNetworkAvailable] = useState(null); // null=loading
@@ -83,7 +88,7 @@ export default function Settings() {
       const res = await scanWifi(apiBase);
       setScanResults(res.networks ?? res.items ?? res ?? []);
     } catch (err) {
-      setError(err.message || "WiFi scan unavailable");
+      setActionError(err.message || "WiFi scan unavailable");
       setScanResults([]);
     } finally {
       setScanning(false);
@@ -99,7 +104,7 @@ export default function Settings() {
       setPsk("");
       await loadNetwork();
     } catch (err) {
-      setError(err.message || "WiFi connect failed");
+      setActionError(err.message || "WiFi connect failed");
     } finally {
       setWifiBusy(false);
     }
@@ -121,7 +126,7 @@ export default function Settings() {
       await setAp(apiBase, on);
       await loadNetwork();
     } catch (err) {
-      setError(err.message || "Access point toggle failed");
+      setActionError(err.message || "Access point toggle failed");
     } finally {
       setApBusy(false);
     }
@@ -132,7 +137,7 @@ export default function Settings() {
       await setRecordingCaptureMode(apiBase, mode);
       await refreshCaptureMode(apiBase);
     } catch (err) {
-      setError(err.message || "Failed to change capture mode");
+      setActionError(err.message || "Failed to change capture mode");
     }
   }
 
@@ -148,7 +153,7 @@ export default function Settings() {
       await restartServices(apiBase);
       setTimeout(() => refresh(), 2500);
     } catch (err) {
-      setError(err.message || "Restart failed");
+      setActionError(err.message || "Restart failed");
     } finally {
       setRestarting(false);
     }
@@ -172,6 +177,12 @@ export default function Settings() {
         <span className="label">configuration</span>
         <h1 className="display">Setup</h1>
       </div>
+
+      {actionError ? (
+        <div className="notice" role="alert">
+          {actionError}
+        </div>
+      ) : null}
 
       {/* WiFi */}
       <Card

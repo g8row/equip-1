@@ -12,17 +12,10 @@ const config: CapacitorConfig = {
       keystorePath: undefined,
       keystoreAlias: undefined,
     }
-  },
-  plugins: {
-    BleClient: {
-      displayStrings: {
-        scanning: 'Scanning for equip-1...',
-        cancel: 'Cancel',
-        availableDevices: 'Nearby equip-1 devices',
-        noDeviceFound: 'No equip-1 device found',
-      }
-    }
   }
+  // Note: BleClient.displayStrings (native "requestDevice" picker dialog
+  // copy) was removed here — lib/ble.js uses requestLEScan, never
+  // requestDevice, so that config was never read.
 };
 
 export default config;

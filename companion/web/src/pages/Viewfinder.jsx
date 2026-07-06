@@ -50,6 +50,16 @@ export default function Viewfinder() {
   // A one-time notice for "the device auto-stopped while you were away",
   // surfaced once reachability returns (T4.4's last_stop_reason).
   const [returnNotice, setReturnNotice] = useState("");
+  // Transient toast — currently only used for the WHEP-exhausted-retries auto
+  // downgrade to MJPEG, since WhepPlayer itself unmounts the instant
+  // streamMode flips (its own error UI would vanish with it).
+  const [toast, setToast] = useState("");
+
+  useEffect(() => {
+    if (!toast) return undefined;
+    const id = setTimeout(() => setToast(""), 5000);
+    return () => clearTimeout(id);
+  }, [toast]);
 
   const isStale = reachable === false;
 
@@ -197,8 +207,18 @@ export default function Viewfinder() {
         </div>
       ) : null}
 
+      {toast && (
+        <div className="notice" role="status" aria-live="polite">
+          {toast}
+        </div>
+      )}
+
       {storageLevel && (
-        <div className={`notice ${storageLevel === "critical" ? "notice--hazard" : ""}`}>
+        <div
+          className={`notice ${storageLevel === "critical" ? "notice--hazard" : ""}`}
+          role={storageLevel === "critical" ? "alert" : "status"}
+          aria-live={storageLevel === "critical" ? undefined : "polite"}
+        >
           {storageLevel === "critical"
             ? `Storage critically low — ${formatBytes(freeBytes)} free. Recording will auto-stop to avoid a corrupt file.`
             : `Storage running low — ${formatBytes(freeBytes)} free. Delete some recordings soon.`}
@@ -240,6 +260,10 @@ export default function Viewfinder() {
             whepUrl={whepUrl}
             active={streamMode === "webrtc" && !!apiBase}
             status={status}
+            onFallback={() => {
+              setStreamMode("mjpeg");
+              setToast("WebRTC couldn't connect after repeated retries — switched to MJPEG.");
+            }}
           />
         )}
         {streamMode === "mjpeg" && (

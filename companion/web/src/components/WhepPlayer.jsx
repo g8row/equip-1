@@ -6,8 +6,13 @@ import { describeStreamFailure, responseDetail, streamIssue } from "../lib/strea
  * WebRTC WHEP player. Connects to the companion API's WHEP signalling
  * endpoint, attaches the remote stream, and aggressively seeks to the live
  * edge to keep latency low. Auto-retries on 503 (stream warming up).
+ *
+ * `onFallback`, if provided, is called once retries are exhausted with a
+ * camera actually present — the caller (Viewfinder) uses it to switch
+ * `streamMode` to "mjpeg", the same path as its manual "Switch to MJPEG"
+ * button.
  */
-export default function WhepPlayer({ whepUrl, active, status }) {
+export default function WhepPlayer({ whepUrl, active, status, onFallback }) {
   const videoRef = useRef(null);
   const pcRef = useRef(null);
   const retryTimerRef = useRef(null);
@@ -16,9 +21,16 @@ export default function WhepPlayer({ whepUrl, active, status }) {
   const [errorMsg, setErrorMsg] = useState("");
 
   const preflightIssue = streamIssue(status, "webrtc");
+  const cameraPresent = status?.stream?.requirements?.camera_present !== false;
 
-  const connect = useCallback(async () => {
+  // `isRetry` distinguishes the internal retry chain (which must keep
+  // counting attempts) from every other caller — the Reconnect button and
+  // the active-state effect — which are all "start over" and should reset
+  // the counter. `connect` (below) is the public, no-arg entry point wired
+  // to those; never call attemptConnect(true) from outside the retry chain.
+  const attemptConnect = useCallback(async (isRetry = false) => {
     if (!whepUrl || !active) return;
+    if (!isRetry) retryCountRef.current = 0;
     if (preflightIssue) {
       setState("error");
       setErrorMsg(preflightIssue);
@@ -96,7 +108,14 @@ export default function WhepPlayer({ whepUrl, active, status }) {
           retryCountRef.current = attempt;
           setState("retrying");
           setErrorMsg(`Stream not ready — retrying (${attempt}/${MAX_RETRIES})…`);
-          retryTimerRef.current = setTimeout(connect, 4000);
+          retryTimerRef.current = setTimeout(() => attemptConnect(true), 4000);
+          return;
+        }
+        // Retries exhausted. If there's actually a camera attached, WebRTC is
+        // just not going to come up (no WHEP-capable encoder, etc.) — hand
+        // off to MJPEG rather than leaving the user staring at a dead player.
+        if (cameraPresent && onFallback) {
+          onFallback();
           return;
         }
       }
@@ -113,7 +132,12 @@ export default function WhepPlayer({ whepUrl, active, status }) {
       const message = err.name === "AbortError" ? "Failed to fetch" : err.message;
       setErrorMsg(describeStreamFailure("webrtc", message));
     }
-  }, [whepUrl, active, preflightIssue]);
+  }, [whepUrl, active, preflightIssue, cameraPresent, onFallback]);
+
+  // Public entry point: the button and the auto-connect effect always "start
+  // over" a fresh attempt sequence, so they route through here rather than
+  // calling attemptConnect(true) directly.
+  const connect = useCallback(() => attemptConnect(false), [attemptConnect]);
 
   const disconnect = useCallback(() => {
     if (retryTimerRef.current) {

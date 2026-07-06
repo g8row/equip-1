@@ -17,6 +17,7 @@ import {
   probeServer,
 } from "../api";
 import { isNative } from "../lib/native";
+import { getPref, setPref } from "../lib/prefs";
 
 const SERVER_KEY = "equip1:selectedApiBase";
 const STREAM_MODE_KEY = "equip1:streamMode";
@@ -35,16 +36,26 @@ const ServerContext = createContext(null);
 
 export function ServerProvider({ children }) {
   const location = useLocation();
-  const hadStoredServer = !!localStorage.getItem(SERVER_KEY);
-  const initialApiBase = localStorage.getItem(SERVER_KEY) || getDefaultApiBase();
-  const [apiBase, setApiBaseState] = useState(initialApiBase);
+  // The stored device address lives in @capacitor/preferences on native (not
+  // localStorage — Android is free to clear the WebView's storage
+  // independently of app data) and localStorage on web, where Preferences
+  // isn't worth pulling in. Preferences is async, so native can't know the
+  // real value synchronously at first render; start from the web-only
+  // synchronous default and correct it in the effect below. Default
+  // hasStoredServer to true on native during that brief window so a genuinely
+  // returning user doesn't flash through the first-run Connect redirect.
+  const [apiBase, setApiBaseState] = useState(() =>
+    isNative() ? getDefaultApiBase() : localStorage.getItem(SERVER_KEY) || getDefaultApiBase()
+  );
   const [status, setStatus] = useState(null);
   const [files, setFiles] = useState([]);
   const [error, setError] = useState("");
   const [captureModeConfig, setCaptureModeConfig] = useState(null);
   const [reachable, setReachable] = useState(null); // null=unknown
   const [lastSeenAt, setLastSeenAt] = useState(null); // ms epoch of last good refresh
-  const [hasStoredServer, setHasStoredServer] = useState(hadStoredServer);
+  const [hasStoredServer, setHasStoredServer] = useState(() =>
+    isNative() ? true : !!localStorage.getItem(SERVER_KEY)
+  );
   const [viewfinderActive, setViewfinderActive] = useState(false);
   // Assume foregrounded until the native App plugin says otherwise (web has
   // no such concept and should just always poll normally).
@@ -59,12 +70,31 @@ export function ServerProvider({ children }) {
   const setApiBase = useCallback((base) => {
     const clean = (base || "").trim().replace(/\/+$/, "");
     if (!clean) return;
-    localStorage.setItem(SERVER_KEY, clean);
+    setPref(SERVER_KEY, clean);
     setApiBaseState(clean);
     // First-run redirect only needs to fire before a device is ever chosen —
     // once the user has picked one (even earlier this session), treat them
     // as past onboarding so navigating "/" doesn't bounce back to Connect.
     setHasStoredServer(true);
+  }, []);
+
+  // Native: resolve the real stored address from Preferences once on mount
+  // and correct the synchronous placeholder above.
+  useEffect(() => {
+    if (!isNative()) return undefined;
+    let cancelled = false;
+    getPref(SERVER_KEY).then((stored) => {
+      if (cancelled) return;
+      if (stored) {
+        setApiBaseState(stored);
+        setHasStoredServer(true);
+      } else {
+        setHasStoredServer(false);
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const setStreamMode = useCallback((mode) => {

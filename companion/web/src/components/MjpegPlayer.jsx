@@ -17,7 +17,14 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
   const [nonce, setNonce] = useState(Date.now());
   const [imgError, setImgError] = useState("");
   const [loaded, setLoaded] = useState(false);
-  const [frameUrl, setFrameUrl] = useState(""); // native: current blob: URL
+  // Native frames land here directly (imgRef.current.src = url) rather than
+  // through React state — a DV feed can deliver 25-30 frames/sec, and routing
+  // every one through setState would mean 25-30 re-renders/sec of this whole
+  // component for no benefit (React never needs to reconcile anything else
+  // about the tree when a frame arrives). frameUrlRef tracks the current
+  // blob: URL purely so it can be revoked once the next one lands.
+  const imgRef = useRef(null);
+  const frameUrlRef = useRef("");
   const lastFrameAtRef = useRef(0);
 
   const preflightIssue = streamIssue(status, "mjpeg");
@@ -55,22 +62,28 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
     const stop = startMjpegStream(streamUrl, {
       onFrame: (url) => {
         lastFrameAtRef.current = Date.now();
+        const prevUrl = frameUrlRef.current;
+        frameUrlRef.current = url;
+        if (imgRef.current) imgRef.current.src = url;
+        // Revoke the previous blob in the same tick — nothing still needs it
+        // once the new one is assigned as the src.
+        if (prevUrl) URL.revokeObjectURL(prevUrl);
+        // setState calls with a value equal to the current one bail out
+        // without a re-render, so these are only "real" updates on the first
+        // frame (loaded false->true) or after an actual error clears.
         setLoaded(true);
         setImgError("");
-        setFrameUrl((prev) => {
-          if (prev) URL.revokeObjectURL(prev);
-          return url;
-        });
       },
       onError: (err) => setImgError(describeStreamFailure("mjpeg", err?.message)),
       onEnd: () => setImgError((c) => c || describeStreamFailure("mjpeg")),
     });
     return () => {
       stop();
-      setFrameUrl((prev) => {
-        if (prev) URL.revokeObjectURL(prev);
-        return "";
-      });
+      if (frameUrlRef.current) {
+        URL.revokeObjectURL(frameUrlRef.current);
+        frameUrlRef.current = "";
+      }
+      if (imgRef.current) imgRef.current.removeAttribute("src");
     };
   }, [active, preflightIssue, nonce, streamUrl]);
 
@@ -100,9 +113,10 @@ export default function MjpegPlayer({ streamUrl, active, status }) {
     <div>
       <div className="viewer viewer--4-3">
         {streaming && NATIVE ? (
-          frameUrl ? (
-            <img className="viewer__media" src={frameUrl} alt="Camera preview" />
-          ) : null
+          // src is never set here — the stream effect above writes
+          // imgRef.current.src directly per frame. The viewer__cover overlay
+          // (below) masks this element until `loaded` flips true.
+          <img ref={imgRef} className="viewer__media" alt="Camera preview" />
         ) : streaming ? (
           <img
             className="viewer__media"

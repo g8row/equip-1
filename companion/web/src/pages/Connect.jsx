@@ -775,7 +775,7 @@ export default function Connect() {
         <Card title="Connected over hotspot">
           <div style={{ display: "flex", flexDirection: "column", gap: "var(--sp-4)" }}>
             <div style={{ display: "flex", alignItems: "center", gap: "var(--sp-3)" }}>
-              <StatusDot state="ok" />
+              <StatusDot state="ok" srLabel="Connected" />
               <span className="data" style={{ fontSize: "0.85rem" }}>
                 {apiBase}
               </span>
@@ -932,7 +932,11 @@ export default function Connect() {
               <li>Connect your phone to <span className="data">{selectedSsid}</span>.</li>
               <li>Then tap Find device below.</li>
             </ol>
-            {bleError && <div className="notice">{bleError}</div>}
+            {bleError && (
+              <div className="notice" role="alert">
+                {bleError}
+              </div>
+            )}
             <Button variant="primary" block onClick={findAfterProvision} disabled={isDiscovering}>
               {isDiscovering ? "Searching…" : "Find device"}
             </Button>
@@ -995,7 +999,11 @@ export default function Connect() {
           <p className="dim" style={{ fontSize: "0.8rem", marginTop: 0 }}>
             The device isn&apos;t on a network yet. Pick a WiFi network for it to join.
           </p>
-          {wifiScanError && <div className="notice">{wifiScanError}</div>}
+          {wifiScanError && (
+            <div className="notice" role="alert">
+              {wifiScanError}
+            </div>
+          )}
           {wifiNetworks.length === 0 && !wifiScanError ? (
             <p className="dim" style={{ fontSize: "0.82rem" }}>
               No networks found nearby.
@@ -1235,12 +1243,19 @@ export default function Connect() {
         <h1 className="display">Connect</h1>
       </div>
 
-      {error ? <div className="notice">{error}</div> : null}
+      {error ? (
+        <div className="notice" role="alert">
+          {error}
+        </div>
+      ) : null}
 
       {/* Current status */}
       <Card title="Current">
         <div className="status-line">
-          <StatusDot state={reachable ? "ok" : reachable === false ? "warn" : "idle"} />
+          <StatusDot
+            state={reachable ? "ok" : reachable === false ? "warn" : "idle"}
+            srLabel={reachable ? "Connected" : reachable === false ? "Unreachable" : "Checking connection"}
+          />
           <span className="data">{apiBase || "—"}</span>
         </div>
       </Card>
