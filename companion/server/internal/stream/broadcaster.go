@@ -18,7 +18,11 @@ type MjpegBroadcaster struct {
 	rtspURL string
 	hub     *Hub
 
-	mu      sync.Mutex
+	mu sync.Mutex
+	// gen is bumped every time Start (re)spawns ffmpeg. It lets the
+	// reader-done goroutine from a superseded spawn recognize it no longer
+	// owns the "running" state, mirroring the same guard in SeamlessDvHub.
+	gen     uint64
 	ffmpeg  *proc.Proc
 	stdoutR *os.File
 	running bool
@@ -33,23 +37,29 @@ func NewMjpegBroadcaster(rtspURL string) *MjpegBroadcaster {
 }
 
 // Start launches the broadcaster ffmpeg (idempotent).
+//
+// The lock is held across the entire body, spawn included, so two concurrent
+// callers can't both observe "not running" and each spawn their own ffmpeg.
+// running is only set true after a successful spawn — an early "running=true"
+// before the spawn attempt would itself create exactly that window if the
+// spawn is slow or fails.
 func (b *MjpegBroadcaster) Start() {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+
 	if b.running {
-		b.mu.Unlock()
 		return
 	}
-	b.running = true
-	b.mu.Unlock()
+
+	b.stopLocked(b.gen)
+	b.gen++
+	gen := b.gen
 
 	args := capture.BroadcasterFFmpegArgs(b.rtspURL)
 	cmd := exec.Command(args[0], args[1:]...)
 	r, w, err := proc.NewStdoutPipe(cmd)
 	if err != nil {
 		slog.Error("mjpeg-broadcaster-ffmpeg-failed", "error", err)
-		b.mu.Lock()
-		b.running = false
-		b.mu.Unlock()
 		return
 	}
 	// stderr → DEVNULL (left nil).
@@ -58,42 +68,59 @@ func (b *MjpegBroadcaster) Start() {
 		r.Close()
 		w.Close()
 		slog.Error("mjpeg-broadcaster-ffmpeg-failed", "error", err)
-		b.mu.Lock()
-		b.running = false
-		b.mu.Unlock()
 		return
 	}
 	w.Close() // parent must release its write end so reads see EOF on exit
 
-	b.mu.Lock()
 	b.ffmpeg = p
 	b.stdoutR = r
-	b.mu.Unlock()
+	b.running = true
 
-	slog.Info("mjpeg-broadcaster-start", "ffmpeg_pid", p.Pid(), "rtsp", b.rtspURL)
+	slog.Info("mjpeg-broadcaster-start", "gen", gen, "ffmpeg_pid", p.Pid(), "rtsp", b.rtspURL)
 
 	go func() {
 		b.hub.ReadLoop(r)
 		r.Close()
-		b.mu.Lock()
-		b.running = false
-		b.mu.Unlock()
+		b.stopIfGen(gen)
 	}()
 }
 
 // Stop terminates the broadcaster ffmpeg and notifies all clients.
 func (b *MjpegBroadcaster) Stop() {
 	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.gen++
+	b.stopLocked(b.gen)
+}
+
+// stopLocked tears down the current ffmpeg process, if any. Caller must hold
+// b.mu. Safe to call when nothing is running.
+func (b *MjpegBroadcaster) stopLocked(gen uint64) {
+	if !b.running && b.ffmpeg == nil {
+		return
+	}
 	b.running = false
 	ffmpeg := b.ffmpeg
 	b.ffmpeg = nil
-	b.mu.Unlock()
+	b.stdoutR = nil
 
 	if ffmpeg != nil {
 		ffmpeg.Terminate(3 * time.Second)
 	}
 	b.hub.CloseAll()
-	slog.Info("mjpeg-broadcaster-stopped")
+	slog.Info("mjpeg-broadcaster-stopped", "gen", gen)
+}
+
+// stopIfGen clears running only if gen is still the current generation —
+// otherwise a newer Start() has already superseded this spawn and this
+// reader-done goroutine must not clobber its state.
+func (b *MjpegBroadcaster) stopIfGen(gen uint64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.gen != gen {
+		return
+	}
+	b.stopLocked(gen)
 }
 
 // Subscribe registers a client.

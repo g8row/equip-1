@@ -30,7 +30,13 @@ type SeamlessDvHub struct {
 	rtspURL  string
 	hub      *Hub
 
-	mu           sync.Mutex
+	mu sync.Mutex
+	// gen is bumped every time a pipeline is (re)started. It lets goroutines
+	// spawned for an old pipeline (pumpLoop) recognize they've been
+	// superseded and no-op instead of tearing down a newer pipeline —
+	// without gen-guarding, a stale pumpLoop racing a fresh EnsureRunning
+	// call could stop the wrong generation (stream flap / double capture).
+	gen          uint64
 	running      bool
 	dvgrab       *proc.Proc
 	ffmpeg       *proc.Proc
@@ -53,16 +59,24 @@ func NewSeamlessDvHub(mediamtx *MediamtxManager, rtspURL string) *SeamlessDvHub 
 // EnsureRunning starts the capture pipeline if it is not already alive. It is
 // idempotent. Mirrors ensure_running (which can raise when no encoder is
 // available — here that surfaces as an error).
+//
+// The lock is held across the entire body, spawn included: releasing it
+// between the liveness check and the stop/spawn (as the previous version did)
+// left a window where two concurrent callers could both decide to spawn,
+// producing two competing dvgrab/ffmpeg pairs fighting over the same FireWire
+// device and RTSP path.
 func (s *SeamlessDvHub) EnsureRunning() error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	if s.running && s.dvgrab != nil && s.ffmpeg != nil &&
 		!s.dvgrab.Exited() && !s.ffmpeg.Exited() {
-		s.mu.Unlock()
 		return nil
 	}
-	s.mu.Unlock()
 
-	s.Stop()
+	s.stopLocked(s.gen)
+	s.gen++
+	gen := s.gen
 
 	if !s.mediamtx.IsRunning() {
 		s.mediamtx.Start()
@@ -142,21 +156,19 @@ func (s *SeamlessDvHub) EnsureRunning() error {
 	ffErrW.Close()
 	proc.DrainStderr("seamless-ffmpeg", ffErrR)
 
-	s.mu.Lock()
 	s.dvgrab = dvgrabProc
 	s.ffmpeg = ffmpegProc
 	s.dvgrabStdout = dvOutR
 	s.ffmpegStdin = ffInW
 	s.ffmpegStdout = ffOutR
 	s.running = true
-	s.mu.Unlock()
 
-	go s.pumpLoop(dvOutR, ffInW)
+	go s.pumpLoop(gen, dvOutR, ffInW)
 	go func() {
 		s.hub.ReadLoop(ffOutR)
 		slog.Info("seamless-reader-stop")
 	}()
-	slog.Info("seamless-hub-start", "dvgrab_pid", dvgrabProc.Pid(), "ffmpeg_pid", ffmpegProc.Pid())
+	slog.Info("seamless-hub-start", "gen", gen, "dvgrab_pid", dvgrabProc.Pid(), "ffmpeg_pid", ffmpegProc.Pid())
 	return nil
 }
 
@@ -218,8 +230,23 @@ func (s *SeamlessDvHub) Subscribe() (uint64, <-chan []byte, error) {
 func (s *SeamlessDvHub) Unsubscribe(id uint64) { s.hub.Unsubscribe(id) }
 
 // Stop tears down capture, sentinels subscribers and closes the record file.
+// It always tears down the current generation regardless of which one is
+// live, and bumps gen first so any in-flight pumpLoop/stopIfGen from the
+// outgoing generation becomes a no-op rather than racing this call.
 func (s *SeamlessDvHub) Stop() {
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.gen++
+	s.stopLocked(s.gen)
+}
+
+// stopLocked tears down whatever pipeline is currently installed. The caller
+// must hold s.mu for the entire call (it runs Terminate()/Close() calls that
+// can block up to a few seconds). Safe to call when nothing is running.
+func (s *SeamlessDvHub) stopLocked(gen uint64) {
+	if !s.running && s.dvgrab == nil && s.ffmpeg == nil {
+		return
+	}
 	s.running = false
 	ffmpeg := s.ffmpeg
 	dvgrab := s.dvgrab
@@ -234,7 +261,6 @@ func (s *SeamlessDvHub) Stop() {
 	handle := s.recordFile
 	s.recordFile = nil
 	s.recordPath = ""
-	s.mu.Unlock()
 
 	s.hub.CloseAll()
 
@@ -260,32 +286,46 @@ func (s *SeamlessDvHub) Stop() {
 	if ffOut != nil {
 		ffOut.Close()
 	}
-	slog.Info("seamless-hub-stop")
+	slog.Info("seamless-hub-stop", "gen", gen)
+}
+
+// stopIfGen tears down the pipeline only if gen is still the current
+// generation. Used by goroutines belonging to a specific pipeline instance
+// (pumpLoop) so a stale goroutine from a superseded generation cannot stop a
+// newer, already-running pipeline.
+func (s *SeamlessDvHub) stopIfGen(gen uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.gen != gen {
+		return // a newer pipeline exists; stale goroutine, no-op
+	}
+	s.stopLocked(gen)
 }
 
 // pumpLoop reads DV chunks from dvgrab and writes them to ffmpeg stdin and (when
 // recording) the open record file. On any read/write failure it tears the hub
-// down, mirroring _pump_loop calling self.stop().
-func (s *SeamlessDvHub) pumpLoop(dvOut io.Reader, ffIn io.Writer) {
+// down, mirroring _pump_loop calling self.stop() — but only if gen is still
+// current (see stopIfGen).
+func (s *SeamlessDvHub) pumpLoop(gen uint64, dvOut io.Reader, ffIn io.Writer) {
 	buf := make([]byte, mjpegChunkSize)
 	for {
 		s.mu.Lock()
-		running := s.running
+		current := s.gen == gen && s.running
 		recordFile := s.recordFile
 		s.mu.Unlock()
-		if !running {
+		if !current {
 			break
 		}
 
 		n, err := dvOut.Read(buf)
 		if n > 0 {
 			if _, werr := ffIn.Write(buf[:n]); werr != nil {
-				slog.Warn("seamless-pump-ffmpeg-write-failed", "error", werr)
+				slog.Warn("seamless-pump-ffmpeg-write-failed", "error", werr, "gen", gen)
 				break
 			}
 			if recordFile != nil {
 				if _, ferr := recordFile.Write(buf[:n]); ferr != nil {
-					slog.Warn("seamless-pump-file-write-failed", "error", ferr)
+					slog.Warn("seamless-pump-file-write-failed", "error", ferr, "gen", gen)
 				}
 			}
 		}
@@ -293,6 +333,6 @@ func (s *SeamlessDvHub) pumpLoop(dvOut io.Reader, ffIn io.Writer) {
 			break
 		}
 	}
-	slog.Info("seamless-pump-stop")
-	s.Stop()
+	slog.Info("seamless-pump-stop", "gen", gen)
+	s.stopIfGen(gen)
 }
