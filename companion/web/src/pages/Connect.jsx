@@ -749,8 +749,10 @@ export default function Connect() {
         </div>
         <Card title="Choose a WiFi network for the device">
           <p className="dim" style={{ fontSize: "0.8rem", marginTop: 0 }}>
-            The device will join this network and leave its hotspot. 2.4GHz
-            networks work best.
+            The device will join this network and leave its hotspot. Dual-band
+            networks may fail to connect — if this network has both 2.4 GHz
+            and 5 GHz, use its 2.4 GHz-only name (many routers offer a guest
+            or IoT SSID).
           </p>
           {wifiNetworks.length === 0 ? (
             <p className="dim" style={{ fontSize: "0.82rem" }}>

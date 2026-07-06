@@ -287,8 +287,10 @@ export default function Settings() {
               </Button>
             </form>
             <p className="dim" style={{ fontSize: "0.75rem", marginTop: "var(--sp-2)" }}>
-              The device joins one network at a time. 2.4GHz networks work best —
-              5GHz isn&apos;t supported yet.
+              The device joins one network at a time. Dual-band networks may
+              fail to connect — if this network has both 2.4 GHz and 5 GHz,
+              use its 2.4 GHz-only name (many routers offer a guest or IoT
+              SSID).
               {onAp && (
                 <>
                   {" "}
