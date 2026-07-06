@@ -1,5 +1,5 @@
 import React, { useEffect } from "react";
-import { NavLink, Outlet } from "react-router-dom";
+import { Link, NavLink, Outlet } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
 import { setRecordingBar } from "../lib/systemBars";
 import StatusDot from "./ui/StatusDot";
@@ -17,7 +17,7 @@ const NAV = [
   { to: "/", label: "View", end: true, glyph: "view" },
   { to: "/files", label: "Files", glyph: "files" },
   { to: "/settings", label: "Setup", glyph: "setup" },
-  { to: "/connect", label: "Link", glyph: "link" },
+  { to: "/connect", label: "Connect", glyph: "link" },
 ];
 
 function DotGrid({ glyph }) {
@@ -34,11 +34,17 @@ function DotGrid({ glyph }) {
 export default function AppShell() {
   const { status, apiBase, reachable } = useServer();
   const isRecording = status?.recorder?.mode === "recording";
+  // Once the connection drops, `isRecording` reflects the last-known state,
+  // not reality — the device could have auto-stopped (storage, error) while
+  // unreachable. Don't keep asserting "recording" system-wide off stale data.
+  const isStale = reachable === false;
+  const showRecording = isRecording && !isStale;
 
   // Tint the native status bar red while recording — a system-level REC cue.
+  // Cleared as soon as the connection is lost so it can't get stuck red.
   useEffect(() => {
-    setRecordingBar(isRecording);
-  }, [isRecording]);
+    setRecordingBar(showRecording);
+  }, [showRecording]);
 
   let serverState = "warn";
   let serverLabel = "connecting";
@@ -67,13 +73,18 @@ export default function AppShell() {
         </div>
         <div className="shell__status">
           <span className="field">
-            <StatusDot state={isRecording ? "live" : "idle"} />
-            <span className="label">{isRecording ? "rec" : "idle"}</span>
+            <StatusDot state={showRecording ? "live" : "idle"} />
+            <span className="label">{isRecording && isStale ? "rec?" : showRecording ? "rec" : "idle"}</span>
           </span>
-          <span className="field" title={apiBase}>
+          <Link
+            to="/connect"
+            className="field"
+            title={apiBase}
+            style={{ textDecoration: "none" }}
+          >
             <StatusDot state={serverState} />
             <span className="data dim">{host || serverLabel}</span>
-          </span>
+          </Link>
         </div>
       </header>
 

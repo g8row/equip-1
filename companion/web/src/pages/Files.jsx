@@ -8,9 +8,15 @@ import Button from "../components/ui/Button";
 import Thumbnail from "../components/Thumbnail";
 
 export default function Files() {
-  const { apiBase, files, status, reachable, error, refresh, setError } = useServer();
+  // `refresh()` in ServerContext now only polls status (files were pulled out
+  // of the hot loop — see T4.9); this page fetches its own list explicitly.
+  const { apiBase, files, status, reachable, refreshFiles } = useServer();
   const [busy, setBusy] = useState("");
   const [sharing, setSharing] = useState("");
+  // Local, transient action-error state — previously shared the context's
+  // connectivity `error`, which the poll's next successful tick wiped out
+  // within ~1.5s regardless of whether the user had seen it yet.
+  const [actionError, setActionError] = useState("");
 
   // status/files default to their last-known values (or empty) while
   // unreachable — without this, "0 B used" / "No recordings found yet."
@@ -22,25 +28,27 @@ export default function Files() {
 
   async function onDelete(name) {
     if (!window.confirm(`Delete ${name}? This cannot be undone.`)) return;
+    setActionError("");
     setBusy(name);
     try {
       await deleteFile(apiBase, name);
-      await refresh();
+      await refreshFiles();
     } catch (err) {
-      setError(err.message || "Delete failed");
+      setActionError(err.message || "Delete failed");
     } finally {
       setBusy("");
     }
   }
 
   async function onShare(file) {
+    setActionError("");
     setSharing(file.name);
     try {
       await shareFile(getFileDownloadUrl(apiBase, file.name), file.name);
     } catch (err) {
       // User-cancelled share sheets reject too — don't surface those as errors.
       if (!/cancel/i.test(err.message || "")) {
-        setError(err.message || "Share failed");
+        setActionError(err.message || "Share failed");
       }
     } finally {
       setSharing("");
@@ -54,7 +62,11 @@ export default function Files() {
         <h1 className="display">Files</h1>
       </div>
 
-      {error ? <div className="notice">{error}</div> : null}
+      {actionError ? (
+        <div className="notice" role="alert">
+          {actionError}
+        </div>
+      ) : null}
 
       <Card title="Disk usage">
         {offline ? (
@@ -87,7 +99,7 @@ export default function Files() {
       <Card
         title="Recordings"
         action={
-          <Button size="sm" variant="ghost" onClick={() => refresh()}>
+          <Button size="sm" variant="ghost" onClick={() => refreshFiles()}>
             Refresh
           </Button>
         }

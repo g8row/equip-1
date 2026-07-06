@@ -1,4 +1,4 @@
-import React, { useMemo, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
 import {
@@ -19,12 +19,70 @@ import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import StatusDot from "../components/ui/StatusDot";
 
-export default function Viewfinder() {
-  const { apiBase, status, files, refresh, setError, error, streamMode, setStreamMode, reachable } =
-    useServer();
-  const [sharing, setSharing] = useState(false);
+// "3s" / "1m 05s" — used for the frozen-timer "last seen" badge while the
+// device is unreachable. Kept local since it's only meaningful here.
+function formatAgo(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  const m = Math.floor(s / 60);
+  return `${m}m ${String(s % 60).padStart(2, "0")}s`;
+}
 
+export default function Viewfinder() {
+  const {
+    apiBase,
+    status,
+    files,
+    refresh,
+    refreshFiles,
+    streamMode,
+    setStreamMode,
+    reachable,
+    lastSeenAt,
+    setViewfinderActive,
+  } = useServer();
+  const [sharing, setSharing] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Action errors (toggle/share) are local and transient — they used to share
+  // the context's connectivity `error`, which a successful poll tick wiped
+  // out from under the user within ~1.5s.
+  const [actionError, setActionError] = useState("");
+  // A one-time notice for "the device auto-stopped while you were away",
+  // surfaced once reachability returns (T4.4's last_stop_reason).
+  const [returnNotice, setReturnNotice] = useState("");
+
+  const isStale = reachable === false;
+
+  // Tell the poll loop the fast (1.5s) cadence is worth running.
+  useEffect(() => {
+    setViewfinderActive(true);
+    return () => setViewfinderActive(false);
+  }, [setViewfinderActive]);
+
+  // Force a re-render every second while stale so the "last seen Ns ago"
+  // badge keeps counting instead of freezing on the value at disconnect.
+  const [, tick] = useState(0);
+  useEffect(() => {
+    if (!isStale) return undefined;
+    const id = setInterval(() => tick((n) => n + 1), 1000);
+    return () => clearInterval(id);
+  }, [isStale]);
+
+  // Surface an auto-stop that happened while disconnected, once, when the
+  // connection comes back. Inert until the backend exposes
+  // status.recorder.last_stop_reason (T4.4) — safe no-op until then.
+  const prevReachableRef = useRef(reachable);
+  useEffect(() => {
+    const wasUnreachable = prevReachableRef.current === false;
+    prevReachableRef.current = reachable;
+    if (!wasUnreachable || reachable !== true) return;
+    const reason = status?.recorder?.last_stop_reason;
+    if (reason && reason !== "user") {
+      setReturnNotice(
+        `Recording stopped while disconnected (${reason.replace(/_/g, " ")}).`
+      );
+    }
+  }, [reachable, status]);
 
   const isRecording = status?.recorder?.mode === "recording";
   const timer = useMemo(
@@ -81,7 +139,7 @@ export default function Viewfinder() {
       await shareFile(getFileDownloadUrl(apiBase, lastFile.name), lastFile.name);
     } catch (err) {
       if (!/cancel/i.test(err.message || "")) {
-        setError(err.message || "Share failed");
+        setActionError(err.message || "Share failed");
       }
     } finally {
       setSharing(false);
@@ -89,18 +147,21 @@ export default function Viewfinder() {
   }
 
   async function onToggleRecording() {
+    setActionError("");
     setLoading(true);
     try {
       if (isRecording) {
         await stopRecording(apiBase);
         hapticImpact("Light");
+        await refresh();
+        await refreshFiles();
       } else {
         await startRecording(apiBase);
         hapticImpact("Heavy");
+        await refresh();
       }
-      await refresh();
     } catch (err) {
-      setError(err.message || "Toggle failed");
+      setActionError(err.message || "Toggle failed");
       hapticNotification("Error");
     } finally {
       setLoading(false);
@@ -114,7 +175,27 @@ export default function Viewfinder() {
         <h1 className="display">Live</h1>
       </div>
 
-      {error ? <div className="notice">{error}</div> : null}
+      {isStale && (
+        <div className="notice notice--hazard" role="alert">
+          Connection lost — the device may still be recording.
+          {lastSeenAt ? ` Last seen ${formatAgo(Date.now() - lastSeenAt)} ago.` : ""}
+        </div>
+      )}
+
+      {returnNotice && (
+        <div className="notice" role="status" aria-live="polite">
+          {returnNotice}{" "}
+          <Button size="sm" variant="ghost" onClick={() => setReturnNotice("")}>
+            Dismiss
+          </Button>
+        </div>
+      )}
+
+      {actionError ? (
+        <div className="notice" role="alert">
+          {actionError}
+        </div>
+      ) : null}
 
       {storageLevel && (
         <div className={`notice ${storageLevel === "critical" ? "notice--hazard" : ""}`}>
@@ -177,10 +258,30 @@ export default function Viewfinder() {
 
       <Card>
         <div className="rec-toggle">
-          <StatusDot state={isRecording ? "live" : "idle"} />
+          {/* While stale, the last-known mode isn't trustworthy — grey the dot
+              rather than keep asserting a live "recording" state. */}
+          <StatusDot state={isRecording && !isStale ? "live" : "idle"} />
           <div className="rec-toggle__info">
-            <span className="label">{isRecording ? "recording" : "standby"}</span>
-            <div className="readout">{timer}</div>
+            <span className="label">
+              {isStale
+                ? isRecording
+                  ? "recording (unconfirmed)"
+                  : "standby (unconfirmed)"
+                : isRecording
+                ? "recording"
+                : "standby"}
+            </span>
+            <div className="readout">
+              {timer}
+              {isStale && (
+                <span
+                  className="label"
+                  style={{ marginLeft: "var(--sp-2)", whiteSpace: "normal" }}
+                >
+                  {lastSeenAt ? `last seen ${formatAgo(Date.now() - lastSeenAt)} ago` : "frozen"}
+                </span>
+              )}
+            </div>
           </div>
           <Button
             variant={isRecording ? "primary" : "accent"}

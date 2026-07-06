@@ -48,7 +48,26 @@ export default function Connect() {
   const [selectedSsid, setSelectedSsid] = useState(null);
   const [wifiPsk, setWifiPsk] = useState("");
   const [joinStatus, setJoinStatus] = useState(null); // "connecting" | "connected" | "error"
+  // Aborts an in-flight BLE scan (see startBleScan / cancelBle).
   const bleAbort = useRef(null);
+  // The 20s safety-net timer in joinSelectedNetwork — cleared on cancel/unmount
+  // so it can't fire (and flip the UI to a bogus timeout error) after the flow
+  // has already moved on.
+  const safetyTimerRef = useRef(null);
+  // Set immediately before any deliberate BLE disconnect() call so the
+  // device's onDisconnect callback (which fires for *any* disconnect,
+  // including ones we caused on purpose while moving to the next step) can
+  // tell "we did this" apart from a real unexpected drop.
+  const expectDisconnectRef = useRef(false);
+
+  function onBleDeviceDisconnected() {
+    if (expectDisconnectRef.current) {
+      expectDisconnectRef.current = false;
+      return;
+    }
+    setBleError("Device disconnected unexpectedly");
+    setBleState("error");
+  }
 
   // Auto-navigate once connected
   useEffect(() => {
@@ -63,6 +82,18 @@ export default function Connect() {
     if (bleState === "connected") hapticNotification("Success");
     else if (bleState === "error") hapticNotification("Error");
   }, [bleState]);
+
+  // Cancellation hygiene on unmount: don't let a stray safety timer or an
+  // in-flight scan outlive the page.
+  useEffect(() => {
+    return () => {
+      if (safetyTimerRef.current) {
+        clearTimeout(safetyTimerRef.current);
+        safetyTimerRef.current = null;
+      }
+      bleAbort.current?.abort();
+    };
+  }, []);
 
   // --- BLE flow -----------------------------------------------------------
 
@@ -82,22 +113,31 @@ export default function Connect() {
       return;
     }
 
+    const controller = new AbortController();
+    bleAbort.current = controller;
+
     let device;
     try {
-      device = await scanForDevice((d) => {
-        setBleDevice(d);
-        setBleState("found");
-      });
+      device = await scanForDevice(
+        (d) => {
+          setBleDevice(d);
+          setBleState("found");
+        },
+        { signal: controller.signal }
+      );
     } catch (err) {
+      if (err.name === "AbortError") return; // cancelBle() already reset the UI
       setBleError(err.message || "Scan failed");
       setBleState("error");
       return;
+    } finally {
+      bleAbort.current = null;
     }
 
     setBleState("connecting");
 
     try {
-      await connect(device.deviceId, () => setBleState("error"));
+      await connect(device.deviceId, onBleDeviceDisconnected);
     } catch (err) {
       setBleError("Could not connect: " + (err.message || String(err)));
       setBleState("error");
@@ -112,6 +152,7 @@ export default function Connect() {
       setBleError("Could not read device status: " + (err.message || String(err)));
       setBleState("error");
       const { disconnect } = await import("../lib/ble.js");
+      expectDisconnectRef.current = true;
       await disconnect(device.deviceId);
       return;
     }
@@ -123,6 +164,7 @@ export default function Connect() {
       setApiBase(statusData.api);
       await refresh(statusData.api);
       const { disconnect } = await import("../lib/ble.js");
+      expectDisconnectRef.current = true;
       await disconnect(device.deviceId);
       setBleState("connected");
       return;
@@ -190,9 +232,16 @@ export default function Connect() {
     setBleError(null);
 
     let settled = false;
+    const clearSafetyTimer = () => {
+      if (safetyTimerRef.current) {
+        clearTimeout(safetyTimerRef.current);
+        safetyTimerRef.current = null;
+      }
+    };
     const finishOk = async () => {
       if (settled) return;
       settled = true;
+      clearSafetyTimer();
       try {
         const fresh = await readStatus(bleDevice.deviceId);
         if (fresh.ip && fresh.api) {
@@ -203,14 +252,17 @@ export default function Connect() {
         // Net result said connected but we couldn't re-read status over BLE —
         // the LAN discovery flow below can still find it.
       }
+      expectDisconnectRef.current = true;
       await disconnect(bleDevice.deviceId);
       setBleState("connected");
     };
     const finishError = async (msg) => {
       if (settled) return;
       settled = true;
+      clearSafetyTimer();
       setBleError(msg || "Could not join that network");
       setBleState("error");
+      expectDisconnectRef.current = true;
       await disconnect(bleDevice.deviceId).catch(() => {});
     };
 
@@ -237,8 +289,11 @@ export default function Connect() {
 
     // Safety net: if no notification arrives (BLE/WiFi coexistence on the
     // single AIC8800 radio can be flaky right as the device joins a new
-    // network), poll status directly after a grace period.
-    setTimeout(async () => {
+    // network), poll status directly after a grace period. Held in a ref so
+    // cancelBle()/unmount can clear it — otherwise a user who bails out of
+    // this screen can come back 20s later to a stale timeout error.
+    safetyTimerRef.current = setTimeout(async () => {
+      safetyTimerRef.current = null;
       if (settled) return;
       try {
         const fresh = await readStatus(bleDevice.deviceId);
@@ -292,6 +347,7 @@ export default function Connect() {
     }
     // The device needs a moment to bring the AP + DHCP up before we join.
     await new Promise((r) => setTimeout(r, 2500));
+    expectDisconnectRef.current = true;
     await disconnect(bleDevice.deviceId);
 
     // 2. Join the hotspot from the phone (system dialog).
@@ -410,6 +466,15 @@ export default function Connect() {
   }
 
   function cancelBle() {
+    // Stop an in-flight scan rather than leaving it to time out on its own.
+    bleAbort.current?.abort();
+    bleAbort.current = null;
+    // Same for the joinSelectedNetwork safety-net timer — otherwise it can
+    // fire minutes later against a screen the user already left.
+    if (safetyTimerRef.current) {
+      clearTimeout(safetyTimerRef.current);
+      safetyTimerRef.current = null;
+    }
     // If we joined the device AP, release the binding so the phone falls back
     // to its normal network. Fire-and-forget — never blocks the UI reset.
     if (bleState === "ap-connected" || bleState === "joining-ap") {

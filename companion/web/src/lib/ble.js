@@ -27,10 +27,14 @@ export async function bleInit() {
 // in every packet, so we scan unfiltered and match on name OR service UUID.
 const DEVICE_NAME = 'equip-1';
 
-export async function scanForDevice(onFound, timeoutMs = 15000) {
+// `signal` (an AbortSignal) lets a caller cancel a scan in progress — e.g. the
+// user backing out of the Connect screen — instead of it running to the full
+// timeout regardless.
+export async function scanForDevice(onFound, { timeoutMs = 15000, signal } = {}) {
   const BleClient = await getBle();
   return new Promise((resolve, reject) => {
     let found = null;
+    let settled = false;
 
     const matches = (result) => {
       const name = result.device?.name || result.localName || '';
@@ -39,25 +43,44 @@ export async function scanForDevice(onFound, timeoutMs = 15000) {
       return uuids.some((u) => String(u).toLowerCase() === SERVICE_UUID);
     };
 
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (signal) signal.removeEventListener('abort', onAbort);
+      fn(value);
+    };
+
     const accept = (result) => {
       if (found) return;
       found = result.device;
-      clearTimeout(timer);
       BleClient.stopLEScan().catch(() => {});
       if (onFound) onFound(result.device);
-      resolve(result.device);
+      finish(resolve, result.device);
     };
 
     const timer = setTimeout(() => {
       BleClient.stopLEScan().catch(() => {});
-      if (!found) reject(new Error('No equip-1 device found nearby'));
+      if (!found) finish(reject, new Error('No equip-1 device found nearby'));
     }, timeoutMs);
+
+    const onAbort = () => {
+      BleClient.stopLEScan().catch(() => {});
+      finish(reject, new DOMException('Scan cancelled', 'AbortError'));
+    };
+    if (signal) {
+      if (signal.aborted) {
+        onAbort();
+      } else {
+        signal.addEventListener('abort', onAbort);
+      }
+    }
 
     // Unfiltered scan (no `services`): on this hardware a UUID filter misses the
     // packet that actually carries our UUID. We filter in the callback instead.
     BleClient.requestLEScan({ allowDuplicates: true }, (result) => {
       if (matches(result)) accept(result);
-    }).catch(reject);
+    }).catch((err) => finish(reject, err));
   });
 }
 
