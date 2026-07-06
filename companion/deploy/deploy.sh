@@ -33,7 +33,6 @@ scp "$SCRIPT_DIR/bin/companion-api" "$HOST:/usr/bin/companion-api"
 scp "$SCRIPT_DIR/bin/companion-net" "$HOST:/usr/bin/companion-net"
 
 # Upload unit files
-scp "$SCRIPT_DIR/systemd/mediamtx.service"      "$HOST:/etc/systemd/system/mediamtx.service"
 scp "$SCRIPT_DIR/systemd/companion-api.service" "$HOST:/etc/systemd/system/companion-api.service"
 scp "$SCRIPT_DIR/systemd/companion-net.service" "$HOST:/etc/systemd/system/companion-net.service"
 scp "$SCRIPT_DIR/systemd/rfkill-unblock.service" "$HOST:/etc/systemd/system/rfkill-unblock.service"
@@ -43,10 +42,10 @@ echo "=== Activating on device ==="
 ssh "$HOST" "
     mkdir -p /data/captures
     systemctl daemon-reload
-    systemctl enable bluetooth mediamtx companion-api companion-net
-    systemctl restart mediamtx companion-api companion-net
+    systemctl enable bluetooth companion-api companion-net
+    systemctl restart companion-api companion-net
     echo 'Services started:'
-    systemctl is-active mediamtx companion-api companion-net
+    systemctl is-active companion-api companion-net
 "
 
 echo "=== Done! ==="

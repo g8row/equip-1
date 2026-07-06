@@ -1,13 +1,22 @@
 [Unit]
-Description=equip-1 Companion BLE and Network daemon
-After=bluetooth.service dbus.service
+Description=equip-1 Companion BLE+Network daemon
+# Order after connman too: ConnMan re-rfkill-blocks technologies it isn't
+# actively using, so our unblock below must run *after* it to be the last word.
+After=bluetooth.service dbus.service connman.service
 Wants=bluetooth.service
 
 [Service]
 Type=simple
 User=root
+# hci0 can land rfkill soft-blocked at boot (the AIC8800 registers its rfkill
+# entry late, and ConnMan re-blocks idle technologies), and BlueZ refuses to
+# power a blocked adapter — so powering hci0 fails and this daemon crash-loops.
+# Unblock immediately before every (re)start. Idempotent; the leading "-" keeps
+# it non-fatal if rfkill is ever missing. Verified live: re-blocking hci0 and
+# restarting recovers cleanly instead of exiting 1.
+ExecStartPre=-/usr/sbin/rfkill unblock all
 ExecStart=/usr/bin/companion-net
-Restart=on-failure
+Restart=always
 RestartSec=5
 Environment=EQUIP_API_BASE=http://127.0.0.1:8000
 StandardOutput=journal

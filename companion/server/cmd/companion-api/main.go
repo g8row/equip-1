@@ -22,6 +22,10 @@ import (
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	cfg := config.Load()
 	logging.Setup()
 
@@ -91,9 +95,11 @@ func main() {
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 
+	exitCode := 0
 	select {
 	case err := <-serverErr:
 		slog.Error("http-server-error", "error", err)
+		exitCode = 1
 	case <-stop:
 		slog.Warn("shutdown-begin")
 	}
@@ -111,4 +117,6 @@ func main() {
 	rec.Stop()
 	mediamtx.Stop()
 	slog.Warn("shutdown-complete")
+
+	return exitCode
 }
