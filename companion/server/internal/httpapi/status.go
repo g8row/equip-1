@@ -320,7 +320,9 @@ func (s *Server) handleWhepPost(w http.ResponseWriter, r *http.Request) {
 	}
 
 	hw := w.Header()
-	hw.Set("Access-Control-Allow-Origin", "*")
+	if origin := r.Header.Get("Origin"); origin == allowedOrigin {
+		hw.Set("Access-Control-Allow-Origin", origin)
+	}
 	if resp.RetryAfter != "" {
 		hw.Set("Retry-After", resp.RetryAfter)
 	}

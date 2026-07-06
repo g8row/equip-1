@@ -1,6 +1,7 @@
 // Package httpapi wires the HTTP routes, porting api/main.py to net/http with
-// Go 1.22 method+path ServeMux patterns. CORS allows all origins/methods/
-// headers, and every request is logged.
+// Go 1.22 method+path ServeMux patterns. CORS is restricted to the packaged
+// app's fixed origin (see allowedOrigin); the embedded web UI is same-origin
+// and needs no CORS headers at all. Every request is logged.
 package httpapi
 
 import (
@@ -112,14 +113,29 @@ func (s *Server) Handler() http.Handler {
 // Middleware
 // ---------------------------------------------------------------------------
 
-// cors mirrors main.py's CORSMiddleware: allow all origins/methods/headers and
-// short-circuit preflight OPTIONS requests.
+// allowedOrigin is the packaged Capacitor app's fixed origin (see
+// web/capacitor.config.ts: default androidScheme "https", hostname
+// "localhost" — same on iOS). The app's fetches to the board's real LAN/AP IP
+// are cross-origin from the WebView's point of view even though the request
+// itself is same-device, so they need this reflected explicitly; the
+// embedded web UI is served by companion-api itself and never sends an
+// Origin header for its own same-origin calls.
+const allowedOrigin = "https://localhost"
+
+// cors replaces the previous wildcard CORSMiddleware port: only the packaged
+// app's origin is granted cross-origin access, so an arbitrary third-party
+// site loaded in a browser on the same LAN/AP can no longer read this API
+// from a visitor's tab. Preflight OPTIONS requests are still short-circuited
+// for every origin; requests from a non-allowed origin simply get no
+// Access-Control-* headers, which the browser then blocks itself.
 func cors(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		h := w.Header()
-		h.Set("Access-Control-Allow-Origin", "*")
-		h.Set("Access-Control-Allow-Methods", "*")
-		h.Set("Access-Control-Allow-Headers", "*")
+		if origin := r.Header.Get("Origin"); origin == allowedOrigin {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Set("Access-Control-Allow-Methods", "*")
+			h.Set("Access-Control-Allow-Headers", "*")
+		}
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusOK)
 			return
