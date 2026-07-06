@@ -5,10 +5,11 @@
 // the phone joins that hotspot and talks to the device at the AP gateway.
 //
 // Android (API 29+) forbids silently joining a network. @capgo/capacitor-wifi
-// wraps WifiNetworkSpecifier, which shows a one-tap system dialog and — with
-// autoRouteTraffic — binds this app's traffic to the AP via
-// ConnectivityManager.bindProcessToNetwork() so requests to the AP gateway
-// actually route over WiFi. That binding is what makes AP_GATEWAY reachable.
+// wraps it via addNetwork (a *saved* network / WifiNetworkSuggestion), which
+// shows a one-tap system dialog and installs a normal on-link route to the AP
+// subnet — so AP_GATEWAY is reachable and, unlike the old local-only
+// WifiNetworkSpecifier path, Chromium's WebRTC will actually use the interface
+// (a specifier network gathered zero ICE candidates → black live preview).
 
 import { isNative } from "./native";
 
@@ -25,11 +26,13 @@ export function pskError(psk) {
 // The SSID the device advertises for its own hotspot (its BLE name,
 // "equip-1"; see internal/ble/bluez.go).
 export const AP_SSID = "equip-1";
-// The AP passphrase is NOT hardcoded here — it comes from the device over
-// BLE (the `ap_pass` field on the status characteristic; single source of
-// truth is internal/network/connman.go `APPassphrase`, surfaced onto the
-// status JSON by internal/ble/api.go). Callers must pass it into
-// joinDeviceAp().
+// The AP passphrase is preferably read from the device over BLE (the `ap_pass`
+// field on the status characteristic; single source of truth is
+// internal/network/connman.go `APPassphrase`, surfaced onto the status JSON by
+// internal/ble/api.go) and passed into joinDeviceAp(). AP_PASSPHRASE below is
+// the known-default fallback for the manual-join path where no BLE value is
+// available; keep it in sync with internal/network/connman.go.
+export const AP_PASSPHRASE = "equip1device";
 // ConnMan brings the tether bridge up as 192.168.0.1/24 (its built-in
 // default), so the device API lives here once the phone is on the AP.
 export const AP_GATEWAY = "http://192.168.0.1:8000";
@@ -48,14 +51,23 @@ export async function joinDeviceAp(passphrase) {
   if (!isNative()) {
     throw new Error("WiFi join is only available in the mobile app");
   }
-  if (!passphrase) {
-    throw new Error("Missing AP passphrase — read the device status over BLE first");
-  }
-  const { CapacitorWifi } = await import("@capgo/capacitor-wifi");
-  await CapacitorWifi.connect({
+  const { CapacitorWifi, NetworkSecurityType } = await import("@capgo/capacitor-wifi");
+  // Use addNetwork (a persistent, *saved* network via WifiNetworkSuggestion),
+  // NOT connect() (WifiNetworkSpecifier). A specifier network is "local-only":
+  // no INTERNET capability, hidden from the status bar, never saved — and,
+  // critically, Chromium's WebRTC refuses to use it, so WHEP gathers zero ICE
+  // candidates and the live video stays black (confirmed live on-device). A
+  // saved network shows the WiFi icon, persists, installs a normal on-link route
+  // to 192.168.0.0/24 (so AP_GATEWAY stays reachable without the old
+  // bindProcessToNetwork hack), and is enumerable by WebRTC. The device AP is
+  // WPA3-SAE. addNetwork resolves once the OS add-network dialog is accepted;
+  // the actual association takes a moment, so callers poll AP_GATEWAY.
+  // Prefer the BLE-provided passphrase; fall back to the known default for the
+  // manual-join path that calls joinDeviceAp() with no argument.
+  await CapacitorWifi.addNetwork({
     ssid: AP_SSID,
-    password: passphrase,
-    autoRouteTraffic: true, // route this app's traffic over the AP → reach AP_GATEWAY
+    password: passphrase || AP_PASSPHRASE,
+    securityType: NetworkSecurityType?.SAE ?? 4, // WPA3 Personal (SAE)
   });
 }
 
@@ -68,6 +80,22 @@ export async function leaveDeviceAp() {
     await CapacitorWifi.disconnect();
   } catch {
     // Already disconnected, or the OS dropped it — nothing to do.
+  }
+}
+
+// phoneWifiIp returns the phone's own IPv4 on the current WiFi (e.g.
+// "192.168.0.2"), or null. LAN auto-discovery needs this: on native the app is
+// served from https://localhost, so window.location.hostname yields no usable
+// subnet and discovery would only scan hardcoded guess ranges. Seeding it with
+// the phone's real /24 makes discovery scan the network it's actually on.
+export async function phoneWifiIp() {
+  if (!isNative()) return null;
+  try {
+    const { CapacitorWifi } = await import("@capgo/capacitor-wifi");
+    const { ipAddress } = await CapacitorWifi.getIpAddress();
+    return /^\d+\.\d+\.\d+\.\d+$/.test(ipAddress || "") ? ipAddress : null;
+  } catch {
+    return null;
   }
 }
 

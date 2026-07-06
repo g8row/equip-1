@@ -28,7 +28,7 @@
   --warn: #d6a544;
 
   /* Fonts */
-  --font-display: "Doto", "IBM Plex Mono", ui-monospace, monospace;
+  --font-display: "Doto Variable", "Doto", "IBM Plex Mono", ui-monospace, monospace;
   --font-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
 
   /* Geometry */

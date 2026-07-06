@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { useServer } from "../context/ServerContext";
 import { isNative } from "../lib/native";
 import { hapticNotification } from "../lib/haptics";
-import { pskError } from "../lib/wifi";
+import { pskError, phoneWifiIp } from "../lib/wifi";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
 import StatusDot from "../components/ui/StatusDot";
@@ -359,19 +359,25 @@ export default function Connect() {
     }
     try {
       await joinDeviceAp(bleStatus?.ap_pass);
-    } catch (err) {
-      setBleError(
-        `Couldn't join the ${AP_SSID} hotspot: ${err.message || String(err)}. ` +
-          `You can join it manually in WiFi settings (password in the app), then retry.`
-      );
-      setBleState("error");
+    } catch {
+      // Auto-join failed (user dismissed the system WiFi dialog, or the plugin
+      // errored). Don't dead-end telling them the password is "in the app" —
+      // send them to the manual screen, which shows the SSID + password and an
+      // "I'm connected" button to continue.
+      setBleState("provisioning");
       return;
     }
 
-    // 3. Reach the device at the AP gateway.
+    // 3. Reach the device at the AP gateway. addNetwork() returns as soon as the
+    //    system add-network dialog is accepted; the actual association takes a
+    //    few seconds, so poll rather than giving up on the first miss.
     setApiBase(AP_GATEWAY);
     setManualServer(AP_GATEWAY);
-    const ok = await refresh(AP_GATEWAY);
+    let ok = false;
+    for (let attempt = 0; attempt < 12 && !ok; attempt += 1) {
+      ok = await refresh(AP_GATEWAY);
+      if (!ok) await new Promise((r) => setTimeout(r, 1500));
+    }
     if (ok) {
       setBleState("ap-connected");
     } else {
@@ -447,8 +453,9 @@ export default function Connect() {
           return;
         }
       }
+      const phoneIp = await phoneWifiIp();
       const found = await discoverServers({
-        seeds: [window.location.hostname, ...candidates],
+        seeds: [phoneIp, window.location.hostname, ...candidates].filter(Boolean),
       });
       if (found.length > 0) {
         setApiBase(found[0].base);
@@ -508,8 +515,9 @@ export default function Connect() {
         }
       }
 
+      const phoneIp = await phoneWifiIp();
       const found = await discoverServers({
-        seeds: [window.location.hostname, manualServer, ...candidates],
+        seeds: [phoneIp, window.location.hostname, manualServer, ...candidates].filter(Boolean),
       });
       setDiscovered(found);
 

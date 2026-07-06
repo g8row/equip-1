@@ -6,6 +6,7 @@ import { canShareNative, shareFile } from "../lib/share";
 import { isNative } from "../lib/native";
 import Card from "../components/ui/Card";
 import Button from "../components/ui/Button";
+import ConfirmDialog from "../components/ui/ConfirmDialog";
 import Thumbnail from "../components/Thumbnail";
 import DownloadButton from "../components/DownloadButton";
 
@@ -19,6 +20,9 @@ export default function Files() {
   // connectivity `error`, which the poll's next successful tick wiped out
   // within ~1.5s regardless of whether the user had seen it yet.
   const [actionError, setActionError] = useState("");
+  const [confirm, setConfirm] = useState(null);
+  const askConfirm = (opts) =>
+    new Promise((resolve) => setConfirm({ ...opts, resolve }));
 
   // status/files default to their last-known values (or empty) while
   // unreachable — without this, "0 B used" / "No recordings found yet."
@@ -29,7 +33,13 @@ export default function Files() {
   const usedPercent = Number(storage.used_percent ?? 0);
 
   async function onDelete(name) {
-    if (!window.confirm(`Delete ${name}? This cannot be undone.`)) return;
+    const ok = await askConfirm({
+      title: "Delete recording?",
+      message: `Delete ${name}? This cannot be undone.`,
+      confirmLabel: "Delete",
+      danger: true,
+    });
+    if (!ok) return;
     setActionError("");
     setBusy(name);
     try {
@@ -171,6 +181,22 @@ export default function Files() {
           </ul>
         )}
       </Card>
+
+      <ConfirmDialog
+        open={!!confirm}
+        title={confirm?.title}
+        message={confirm?.message}
+        confirmLabel={confirm?.confirmLabel}
+        danger={confirm?.danger}
+        onConfirm={() => {
+          confirm?.resolve(true);
+          setConfirm(null);
+        }}
+        onCancel={() => {
+          confirm?.resolve(false);
+          setConfirm(null);
+        }}
+      />
     </div>
   );
 }
