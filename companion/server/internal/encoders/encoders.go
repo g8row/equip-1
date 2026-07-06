@@ -35,10 +35,18 @@ var webrtcCompatible = map[string]bool{
 	"libx264":      true,
 }
 
+// probeFailureTTL is how long a full-probe failure (no candidate usable) is
+// cached before the next call re-probes. Without this, every /api/status
+// poll on a device with no usable encoder re-runs the entire candidate list
+// through ffmpegHasEncoder + ffmpegEncoderIsUsable (each candidate up to an
+// 8s subprocess) on every single poll.
+const probeFailureTTL = time.Minute
+
 var (
 	encoderMu            sync.Mutex
 	selectedRTSPEncoder  string
 	selectedRTSPResolved bool
+	probeFailedAt        time.Time
 )
 
 // IsWebRTCCompatible reports whether the encoder can be republished over WebRTC.
@@ -96,6 +104,10 @@ func SelectRTSPVideoEncoder() (string, error) {
 		return selectedRTSPEncoder, nil
 	}
 
+	if !probeFailedAt.IsZero() && time.Since(probeFailedAt) < probeFailureTTL {
+		return "", &NoEncoderError{}
+	}
+
 	candidates := append([]string(nil), candidatePriority...)
 
 	preferred := strings.TrimSpace(os.Getenv("EQUIP_FFMPEG_RTSP_VIDEO_ENCODER"))
@@ -127,6 +139,7 @@ func SelectRTSPVideoEncoder() (string, error) {
 		return encoder, nil
 	}
 
+	probeFailedAt = time.Now()
 	return "", &NoEncoderError{}
 }
 
@@ -169,16 +182,16 @@ func buildArgsForEncoder(encoder, rtspURL string) []string {
 		args = append(args,
 			"-preset", "ultrafast",
 			"-tune", "zerolatency",
-			"-x264-params", "keyint=5:min-keyint=5:scenecut=0:bframes=0",
+			"-x264-params", "keyint=25:min-keyint=25:scenecut=0:bframes=0",
 		)
 	case IsWebRTCCompatible(encoder):
-		args = append(args, "-g", "5", "-bf", "0")
+		args = append(args, "-g", "25", "-bf", "0")
 	default:
 		args = append(args, "-q:v", "5", "-an")
 	}
 
 	if IsWebRTCCompatible(encoder) {
-		args = append(args, "-c:a", "aac", "-b:a", "128k", "-ar", "44100")
+		args = append(args, "-c:a", "aac", "-b:a", "128k", "-ar", "48000")
 	}
 
 	args = append(args, "-f", "rtsp", "-rtsp_transport", "tcp", rtspURL)

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"equip1/companion/server/internal/config"
+	"equip1/companion/server/internal/encoders"
 	"equip1/companion/server/internal/files"
 	"equip1/companion/server/internal/httpapi"
 	"equip1/companion/server/internal/logging"
@@ -28,6 +29,13 @@ func main() {
 func run() int {
 	cfg := config.Load()
 	logging.Setup()
+
+	// Warm the RTSP encoder probe cache in the background so it's already
+	// resolved (success or the T2.4 negative cache) by the time the first
+	// /api/status poll arrives, instead of that request paying for the
+	// candidate probe itself. Result ignored: callers read it back later via
+	// SafeSelectedRTSPEncoder.
+	go func() { _, _ = encoders.SelectRTSPVideoEncoder() }()
 
 	// ---- Singletons ----
 	netMgr, netErr := network.NewManager()
