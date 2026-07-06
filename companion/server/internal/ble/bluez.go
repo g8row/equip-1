@@ -20,12 +20,17 @@ const (
 
 	ifaceObjectManager        = "org.freedesktop.DBus.ObjectManager"
 	ifaceProperties           = "org.freedesktop.DBus.Properties"
+	ifaceDBusDaemon           = "org.freedesktop.DBus"
 	ifaceAdapter              = "org.bluez.Adapter1"
 	ifaceGattManager          = "org.bluez.GattManager1"
 	ifaceLEAdvertisingManager = "org.bluez.LEAdvertisingManager1"
 	ifaceGattService          = "org.bluez.GattService1"
 	ifaceGattCharacteristic   = "org.bluez.GattCharacteristic1"
 	ifaceAdvertisement        = "org.bluez.LEAdvertisement1"
+
+	memberInterfacesAdded   = ifaceObjectManager + ".InterfacesAdded"
+	memberInterfacesRemoved = ifaceObjectManager + ".InterfacesRemoved"
+	memberNameOwnerChanged  = ifaceDBusDaemon + ".NameOwnerChanged"
 
 	serviceUUID       = "e2710000-b5a3-f393-e0a9-e50e24dcca9e"
 	statusUUID        = "e2710001-b5a3-f393-e0a9-e50e24dcca9e"
@@ -68,21 +73,26 @@ const wifiScanCacheTTL = 20 * time.Second
 
 // Server owns the BlueZ advertisement and local GATT application.
 type Server struct {
-	conn        *dbus.Conn
-	api         *APIClient
-	name        string
-	adapterPath dbus.ObjectPath
-	prov        Provisioner
-	netCtl      NetworkController
+	conn   *dbus.Conn
+	api    *APIClient
+	name   string
+	prov   Provisioner
+	netCtl NetworkController
 
-	app     *application
-	ad      *advertisement
-	hciAdv  *legacyAdvertiser
-	status  *characteristic
-	netres  *characteristic
-	ticker  *time.Ticker
-	done    chan struct{}
-	started bool
+	app    *application
+	ad     *advertisement
+	status *characteristic
+	netres *characteristic
+	ticker *time.Ticker
+	done   chan struct{}
+
+	// adapterMu guards the fields below, which change as the BT adapter
+	// (a USB device) disappears and reappears — see watchAdapterEvents.
+	adapterMu   sync.Mutex
+	adapterPath dbus.ObjectPath
+	hciAdv      *legacyAdvertiser
+	started     bool // Start() has run at least once
+	registered  bool // currently registered with a live adapter
 
 	scanMu      sync.Mutex
 	scanResults []byte
@@ -106,9 +116,21 @@ func NewServer(opts Options) (*Server, error) {
 	if opts.Name == "" {
 		opts.Name = "equip-1"
 	}
-	conn, err := dbus.SystemBus()
+	// Use a private bus connection, not the shared dbus.SystemBus() — that
+	// connection is also held by network.Manager, and both call Close() on
+	// their own lifecycle. A shared conn means server.Stop() (e.g. on BLE
+	// construction retry) can pull the rug out from under ConnMan traffic.
+	conn, err := dbus.SystemBusPrivate()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("connect system bus: %w", err)
+	}
+	if err := conn.Auth(nil); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("authenticate system bus: %w", err)
+	}
+	if err := conn.Hello(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("system bus hello: %w", err)
 	}
 	s := &Server{
 		conn:   conn,
@@ -212,20 +234,92 @@ func (s *Server) buildObjects() {
 	s.netres.value = []byte(`{"state":"idle","ssid":null,"ip":null,"err":null}`)
 }
 
-// Start powers the adapter, exports the GATT objects and registers with BlueZ.
+// Start exports the GATT objects, watches BlueZ for adapter lifecycle events,
+// then powers the adapter and registers with BlueZ. It blocks (respecting
+// ctx) until an adapter is available — the AIC8800 is USB and often has not
+// enumerated by the time systemd's After=bluetooth.service is satisfied, so
+// waiting here (instead of failing) fixes the boot-time crash loop.
 func (s *Server) Start(ctx context.Context) error {
-	if s.started {
+	if s.isStarted() {
 		return nil
 	}
+
+	// Exporting is independent of any adapter and idempotent (re-Export just
+	// replaces the handler for a path/interface), so it can run unconditionally.
+	if err := s.exportObjects(); err != nil {
+		return err
+	}
+
+	// Watch BlueZ before searching for the adapter, so no InterfacesAdded
+	// between the search and the watch going live can be missed.
+	sigCh := make(chan *dbus.Signal, 32)
+	s.conn.Signal(sigCh)
+	if err := s.conn.AddMatchSignal(
+		dbus.WithMatchSender(bluezName),
+		dbus.WithMatchInterface(ifaceObjectManager),
+	); err != nil {
+		return fmt.Errorf("watch bluez object manager: %w", err)
+	}
+	if err := s.conn.AddMatchSignal(
+		dbus.WithMatchInterface(ifaceDBusDaemon),
+		dbus.WithMatchMember("NameOwnerChanged"),
+		dbus.WithMatchArg(0, bluezName),
+	); err != nil {
+		return fmt.Errorf("watch bluez name owner: %w", err)
+	}
+
 	adapterPath, err := s.findAdapter()
 	if err != nil {
+		slog.Warn("ble-adapter-not-found-waiting", "error", err)
+		if adapterPath, err = s.waitForAdapter(ctx, sigCh); err != nil {
+			return err
+		}
+	}
+
+	if err := s.registerWithAdapter(adapterPath); err != nil {
 		return err
 	}
+
+	s.setStarted(true)
+	s.ticker = time.NewTicker(5 * time.Second)
+	go s.notifyLoop(ctx)
+	go s.watchAdapterEvents(ctx, sigCh)
+	slog.Info("ble-started", "adapter", adapterPath, "name", s.name, "service_uuid", serviceUUID)
+	return nil
+}
+
+// waitForAdapter blocks until a BlueZ adapter with GATT + LE advertising
+// support shows up, driven by the ObjectManager watch set up in Start rather
+// than polling.
+func (s *Server) waitForAdapter(ctx context.Context, sigCh chan *dbus.Signal) (dbus.ObjectPath, error) {
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case sig, ok := <-sigCh:
+			if !ok {
+				return "", fmt.Errorf("bluez signal channel closed while waiting for adapter")
+			}
+			if !signalIndicatesAdapterUp(sig) {
+				continue
+			}
+			if adapterPath, err := s.findAdapter(); err == nil {
+				return adapterPath, nil
+			}
+		}
+	}
+}
+
+// registerWithAdapter powers the given adapter and (re-)registers the GATT
+// application and advertisement with it. Safe to call again after an adapter
+// disappears and comes back — BlueZ drops all registrations for an adapter
+// object it removes.
+func (s *Server) registerWithAdapter(adapterPath dbus.ObjectPath) error {
+	s.adapterMu.Lock()
 	s.adapterPath = adapterPath
-	if err := s.powerAdapter(); err != nil {
-		return err
-	}
-	if err := s.exportObjects(); err != nil {
+	s.adapterMu.Unlock()
+
+	if err := s.powerAdapter(adapterPath); err != nil {
 		return err
 	}
 
@@ -239,7 +333,10 @@ func (s *Server) Start(ctx context.Context) error {
 	// advertising via hcitool.  The GATT service still handles incoming connections
 	// regardless of which advertising path is used.
 	hciDev := hciDevFromAdapter(string(adapterPath)) // e.g. "/org/bluez/hci0" → "hci0"
-	s.hciAdv = newLegacyAdvertiser(hciDev)
+	hciAdv := newLegacyAdvertiser(hciDev)
+	s.adapterMu.Lock()
+	s.hciAdv = hciAdv
+	s.adapterMu.Unlock()
 
 	regErr := adapter.Call(ifaceLEAdvertisingManager+".RegisterAdvertisement", 0, adPath, map[string]dbus.Variant{}).Err
 	if regErr != nil {
@@ -248,20 +345,141 @@ func (s *Server) Start(ctx context.Context) error {
 	// Always also start legacy HCI advertising so the chip actually transmits —
 	// on AIC8800D80 BlueZ's extended advertising path sets ActiveInstances=1
 	// but never transmits; legacy HCI commands are confirmed to work.
-	if advErr := s.hciAdv.Start(s.name, serviceUUID); advErr != nil {
+	if advErr := hciAdv.Start(s.name, serviceUUID); advErr != nil {
 		slog.Warn("ble-legacy-adv-start-failed", "error", advErr)
 	}
 
-	if regErr != nil && s.hciAdv == nil {
+	if regErr != nil && hciAdv == nil {
 		_ = adapter.Call(ifaceGattManager+".UnregisterApplication", 0, appPath).Err
 		return fmt.Errorf("register advertisement: %w", regErr)
 	}
 
-	s.started = true
-	s.ticker = time.NewTicker(5 * time.Second)
-	go s.notifyLoop(ctx)
-	slog.Info("ble-started", "adapter", adapterPath, "name", s.name, "service_uuid", serviceUUID)
+	s.adapterMu.Lock()
+	s.registered = true
+	s.adapterMu.Unlock()
 	return nil
+}
+
+// watchAdapterEvents runs for the lifetime of the server, reacting to the BT
+// adapter (a USB device) disappearing and reappearing — firmware crash, EMI,
+// or a bluetoothd restart all invalidate every registration made against it.
+func (s *Server) watchAdapterEvents(ctx context.Context, sigCh chan *dbus.Signal) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-s.done:
+			return
+		case sig, ok := <-sigCh:
+			if !ok {
+				return
+			}
+			s.handleAdapterSignal(sig)
+		}
+	}
+}
+
+func (s *Server) handleAdapterSignal(sig *dbus.Signal) {
+	switch sig.Name {
+	case memberInterfacesRemoved:
+		if len(sig.Body) == 0 {
+			return
+		}
+		path, _ := sig.Body[0].(dbus.ObjectPath)
+		if path != "" && path == s.currentAdapterPath() {
+			s.handleAdapterLost("bluez-adapter-removed")
+		}
+	case memberNameOwnerChanged:
+		if len(sig.Body) < 3 {
+			return
+		}
+		name, _ := sig.Body[0].(string)
+		newOwner, _ := sig.Body[2].(string)
+		if name != bluezName {
+			return
+		}
+		if newOwner == "" {
+			s.handleAdapterLost("bluez-name-owner-lost")
+			return
+		}
+		s.handleAdapterReappear()
+	case memberInterfacesAdded:
+		if signalIndicatesAdapterUp(sig) {
+			s.handleAdapterReappear()
+		}
+	}
+}
+
+// handleAdapterLost marks the server unregistered without closing s.conn —
+// s.conn is our own private bus connection (not shared with network.Manager),
+// but it must stay open so future BlueZ signals and the eventual re-register
+// still work.
+func (s *Server) handleAdapterLost(reason string) {
+	s.adapterMu.Lock()
+	wasRegistered := s.registered
+	s.registered = false
+	if s.hciAdv != nil {
+		s.hciAdv.Stop()
+	}
+	s.adapterMu.Unlock()
+	if wasRegistered {
+		slog.Warn("ble-adapter-lost", "reason", reason)
+	}
+}
+
+// handleAdapterReappear re-runs the power/register-app/register-advertisement
+// sequence once BlueZ reports a usable adapter again.
+func (s *Server) handleAdapterReappear() {
+	s.adapterMu.Lock()
+	alreadyRegistered := s.registered
+	s.adapterMu.Unlock()
+	if alreadyRegistered {
+		return
+	}
+
+	adapterPath, err := s.findAdapter()
+	if err != nil {
+		// Not fully back yet (e.g. GattManager1/LEAdvertisingManager1 not
+		// exported yet) — a later InterfacesAdded will retry this.
+		return
+	}
+	if err := s.registerWithAdapter(adapterPath); err != nil {
+		slog.Warn("ble-adapter-reregister-failed", "error", err)
+		return
+	}
+	slog.Info("ble-adapter-recovered", "adapter", adapterPath)
+}
+
+func (s *Server) currentAdapterPath() dbus.ObjectPath {
+	s.adapterMu.Lock()
+	defer s.adapterMu.Unlock()
+	return s.adapterPath
+}
+
+func (s *Server) isStarted() bool {
+	s.adapterMu.Lock()
+	defer s.adapterMu.Unlock()
+	return s.started
+}
+
+func (s *Server) setStarted(v bool) {
+	s.adapterMu.Lock()
+	s.started = v
+	s.adapterMu.Unlock()
+}
+
+// signalIndicatesAdapterUp reports whether an InterfacesAdded signal body
+// includes org.bluez.Adapter1.
+func signalIndicatesAdapterUp(sig *dbus.Signal) bool {
+	if sig.Name != memberInterfacesAdded || len(sig.Body) < 2 {
+		return false
+	}
+	ifaces, ok := sig.Body[1].(map[string]map[string]dbus.Variant)
+	if !ok {
+		return false
+	}
+	_, ok = ifaces[ifaceAdapter]
+	return ok
 }
 
 // Stop unregisters the app/advertisement and closes the D-Bus connection.
@@ -274,11 +492,18 @@ func (s *Server) Stop() {
 	default:
 		close(s.done)
 	}
-	if s.hciAdv != nil {
-		s.hciAdv.Stop()
+
+	s.adapterMu.Lock()
+	hciAdv := s.hciAdv
+	started := s.started
+	adapterPath := s.adapterPath
+	s.adapterMu.Unlock()
+
+	if hciAdv != nil {
+		hciAdv.Stop()
 	}
-	if s.started && s.adapterPath != "" {
-		adapter := s.conn.Object(bluezName, s.adapterPath)
+	if started && adapterPath != "" {
+		adapter := s.conn.Object(bluezName, adapterPath)
 		_ = adapter.Call(ifaceLEAdvertisingManager+".UnregisterAdvertisement", 0, adPath).Err
 		_ = adapter.Call(ifaceGattManager+".UnregisterApplication", 0, appPath).Err
 	}
@@ -307,8 +532,8 @@ func (s *Server) findAdapter() (dbus.ObjectPath, error) {
 	return "", fmt.Errorf("no BlueZ adapter with GATT and LE advertising support found")
 }
 
-func (s *Server) powerAdapter() error {
-	obj := s.conn.Object(bluezName, s.adapterPath)
+func (s *Server) powerAdapter(adapterPath dbus.ObjectPath) error {
+	obj := s.conn.Object(bluezName, adapterPath)
 	if err := obj.Call(ifaceProperties+".Set", 0, ifaceAdapter, "Powered", dbus.MakeVariant(true)).Err; err != nil {
 		return fmt.Errorf("power bluetooth adapter: %w", err)
 	}
@@ -356,9 +581,16 @@ func (s *Server) notifyLoop(ctx context.Context) {
 			}
 			// Re-assert legacy LE advertising every 60s in case BlueZ or a
 			// disconnect reset it (AIC8800 quirk: extended adv doesn't transmit).
-			if tickCount%12 == 0 && s.hciAdv != nil {
-				if err := s.hciAdv.Start(s.name, serviceUUID); err != nil {
-					slog.Debug("ble-legacy-adv-refresh-failed", "error", err)
+			if tickCount%12 == 0 {
+				s.adapterMu.Lock()
+				hciAdv, registered := s.hciAdv, s.registered
+				s.adapterMu.Unlock()
+				if registered && hciAdv != nil {
+					if err := hciAdv.Start(s.name, serviceUUID); err != nil {
+						// Promoted from Debug: this is the only in-field signal
+						// that advertising has silently died.
+						slog.Warn("ble-legacy-adv-refresh-failed", "error", err)
+					}
 				}
 			}
 		}
