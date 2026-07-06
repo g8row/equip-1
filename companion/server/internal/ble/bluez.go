@@ -211,7 +211,7 @@ func (s *Server) buildObjects() {
 		return nil
 	}
 	s.netres.read = func(ctx context.Context) ([]byte, *dbus.Error) {
-		return s.netres.value, nil
+		return s.netres.Value(), nil
 	}
 	wifiScan.read = func(ctx context.Context) ([]byte, *dbus.Error) {
 		return s.wifiScanPayload(), nil
@@ -232,7 +232,7 @@ func (s *Server) buildObjects() {
 		localName:    shortName(s.name),
 		serviceUUIDs: []string{serviceUUID},
 	}
-	s.netres.value = []byte(`{"state":"idle","ssid":null,"ip":null,"err":null}`)
+	s.netres.setValue([]byte(`{"state":"idle","ssid":null,"ip":null,"err":null}`))
 }
 
 // Start exports the GATT objects, watches BlueZ for adapter lifecycle events,
@@ -596,7 +596,7 @@ func (s *Server) notifyLoop(ctx context.Context) {
 			return
 		case <-s.ticker.C:
 			tickCount++
-			if s.status.notifying {
+			if s.status.IsNotifying() {
 				s.status.emitValue(s.conn, s.api.StatusPayload(ctx))
 			}
 			// Re-assert legacy LE advertising every 60s in case BlueZ or a
