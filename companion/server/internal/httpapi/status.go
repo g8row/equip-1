@@ -4,26 +4,53 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"equip1/companion/server/internal/encoders"
 	"equip1/companion/server/internal/stream"
 )
 
+// firewireCameras returns the /dev/fw* nodes for *remote* FireWire devices —
+// an actual camcorder on the bus, not the board's own controller.
+//
+// The local OHCI controller always enumerates as a node (/dev/fw0, is_local=1),
+// so globbing /dev/fw* reports a "camera" even with nothing attached. A DV
+// camcorder only appears as a remote node (is_local=0) while it is connected
+// *and powered on*: plugged in but switched off, it powers down its FireWire
+// PHY and drops off the bus entirely (verified on a Sony DCR-TRV900E — off: only
+// fw0; on: fw1 with is_local=0). So a remote node is our "a live camera is ready
+// to capture" signal, and its absence covers both no-camera and camera-off.
+func firewireCameras() []string {
+	nodes, _ := filepath.Glob("/sys/bus/firewire/devices/fw[0-9]*")
+	cams := []string{}
+	for _, n := range nodes {
+		base := filepath.Base(n)
+		// Skip unit sub-devices (fw1.0 etc.); only the node carries is_local.
+		if strings.Contains(base, ".") {
+			continue
+		}
+		local, err := os.ReadFile(filepath.Join(n, "is_local"))
+		if err != nil || strings.TrimSpace(string(local)) != "0" {
+			continue
+		}
+		cams = append(cams, "/dev/"+base)
+	}
+	return cams
+}
+
 // streamRequirements mirrors _check_stream_requirements.
 func (s *Server) streamRequirements() map[string]any {
-	fwNodes, _ := filepath.Glob("/dev/fw[0-9]*")
-	if fwNodes == nil {
-		fwNodes = []string{}
-	}
+	cams := firewireCameras()
 	return map[string]any{
 		"dvgrab":         lookPathOK("dvgrab"),
 		"ffmpeg":         lookPathOK("ffmpeg"),
 		"mediamtx":       lookPathOK(s.cfg.MediamtxBinary),
-		"camera_present": len(fwNodes) > 0,
-		"camera_devices": fwNodes,
+		"camera_present": len(cams) > 0,
+		"camera_devices": cams,
 	}
 }
 
